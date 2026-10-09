@@ -298,7 +298,12 @@ s32 GameState_GetArenaSize(GameState* gameState) {
 }
 
 s32 func_80173B48(GameState* gameState) {
+#if BENCH
+    // Pin the RDP-time-dependent effect budget (rain, snow, dust counts) so workloads don't depend on RDP speed
+    s32 result = OS_CYCLES_TO_NSEC(gameState->framerateDivisor * gIrqMgrRetraceTime);
+#else
     s32 result = OS_CYCLES_TO_NSEC(gameState->framerateDivisor * gIrqMgrRetraceTime) - OS_CYCLES_TO_NSEC(gRDPTimeTotal);
+#endif
 
     return result;
 }

@@ -68,6 +68,8 @@ VENV ?= .venv
 PYTHON ?= $(VENV)/$(VENV_BIN_DIR)/python3
 # Emulator w/ flags
 N64_EMULATOR ?=
+# If BENCH is 1, build the benchmark-mode ROM into build/$(VERSION)-bench (see tools/bench/README.md)
+BENCH ?= 0
 
 #### Setup ####
 
@@ -97,6 +99,13 @@ ifeq ($(COMPILER),gcc)
   RUN_CC_CHECK := 0
 endif
 
+ifneq ($(BENCH),0)
+  BENCH_DEFINES := -DBENCH=1
+  CFLAGS += $(BENCH_DEFINES)
+  CPPFLAGS += $(BENCH_DEFINES)
+  COMPARE := 0
+endif
+
 ifneq ($(NON_MATCHING),0)
   CFLAGS += -DNON_MATCHING -DAVOID_UB
   CPPFLAGS += -DNON_MATCHING -DAVOID_UB
@@ -106,7 +115,11 @@ endif
 PROJECT_DIR   := $(dir $(realpath $(firstword $(MAKEFILE_LIST))))
 
 BASEROM_DIR   := baseroms/$(VERSION)
-BUILD_DIR     := build/$(VERSION)
+ifneq ($(BENCH),0)
+  BUILD_DIR   := build/$(VERSION)-bench
+else
+  BUILD_DIR   := build/$(VERSION)
+endif
 EXTRACTED_DIR := extracted/$(VERSION)
 EXPECTED_DIR  := expected/$(BUILD_DIR)
 
@@ -164,7 +177,7 @@ CC_CHECK_WARNINGS := -Wall -Wextra -Wno-unknown-pragmas -Wno-unused-parameter -W
 CC_CHECK_WARNINGS += -Werror=implicit-int -Werror=implicit-function-declaration -Werror=int-conversion -Werror=incompatible-pointer-types
 # Have CC_CHECK pretend to be a MIPS compiler
 MIPS_BUILTIN_DEFS := -DMIPSEB -D_MIPS_FPSET=16 -D_MIPS_ISA=2 -D_ABIO32=1 -D_MIPS_SIM=_ABIO32 -D_MIPS_SZINT=32 -D_MIPS_SZPTR=32
-CC_CHECK_FLAGS    := -fno-builtin -fsyntax-only -funsigned-char -fdiagnostics-color -std=gnu89 -m32 -DNON_MATCHING -DAVOID_UB -DCC_CHECK=1
+CC_CHECK_FLAGS    := -fno-builtin -fsyntax-only -funsigned-char -fdiagnostics-color -std=gnu89 -m32 -DNON_MATCHING -DAVOID_UB -DCC_CHECK=1 $(BENCH_DEFINES)
 
 ifneq ($(WERROR), 0)
   CC_CHECK_WARNINGS += -Werror
