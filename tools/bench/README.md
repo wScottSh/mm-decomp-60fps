@@ -34,7 +34,7 @@ ROM requests an emux exit. Where the runner comes from:
 | otherwise | Build it with `tools/n64-timing/build.sh` in the fork checkout and use that binary. A no-op when the build is up to date. |
 | `--fork DIR` or `$ARES_FORK` | Fork checkout to build from. Default `~/repos/ares`. |
 | `$N64_BUILD_DIR` | Build directory for `build.sh`. Default `~/n64-timing/build/<checkout name>`. |
-| `--timeout S` | Host seconds per run, passed as `n64-run --wall-seconds`. Default 300. |
+| `--timeout S` | Host seconds per run, passed as `n64-run --wall-seconds`. Default 600; a run took up to 214 s on a loaded host. |
 
 `meta.json` records the runner path and its sha256. When `bench.py` built the runner, it also records
 `ares_fork`, the `git describe --tags --dirty` of the fork checkout. With `--runner`, `ares_fork` is

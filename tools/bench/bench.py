@@ -137,7 +137,7 @@ def main():
     p.add_argument("--frames", type=int, default=MAX_FRAMES)
     p.add_argument("--seed", type=lambda s: int(s, 0), default=0x12345678)
     p.add_argument("--jobs", type=int, default=1, help="parallel runner instances")
-    p.add_argument("--timeout", type=int, default=300, help="host seconds per run (n64-run --wall-seconds)")
+    p.add_argument("--timeout", type=int, default=600, help="host seconds per run (n64-run --wall-seconds)")
     p.add_argument("--runner", type=Path, default=os.environ.get("N64_RUN"),
                    help="n64-run binary (default $N64_RUN, else build it from $ARES_FORK)")
     p.add_argument("--fork", type=Path, default=Path(os.environ.get("ARES_FORK", DEFAULT_FORK)),
