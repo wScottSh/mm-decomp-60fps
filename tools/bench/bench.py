@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-Run the BENCH=1 ROM in ares and collect per-frame records.
+Run the BENCH=1 ROM on the ares timing-model fork and collect per-frame records.
 
     tools/bench/bench.py --scene all --runs 5 --label baseline
 
-Each run patches the ROM's BenchConfig (found by its magic), runs ares headless with emux enabled,
-and parses the IS-Viewer output into a CSV. Results go to bench-results/<timestamp>-<label>/.
+Each run patches the ROM's BenchConfig (found by its magic), runs it in the fork's headless runner
+n64-run, and parses the IS-Viewer output into a CSV. Results go to bench-results/<timestamp>-<label>/.
 See tools/bench/README.md.
 """
 
@@ -18,7 +18,6 @@ import hashlib
 import json
 import os
 import platform
-import shutil
 import struct
 import subprocess
 import sys
@@ -28,7 +27,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_ROM = ROOT / "build/n64-us-bench/mm-n64-us.z64"
-ARES_WRAPPER = ROOT / "tools/ares/ares-headless.sh"
+DEFAULT_FORK = Path.home() / "repos/ares"
 
 CONFIG_MAGIC = 0x424E4348  # "BNCH", see include/bench.h
 CONFIG_FORMAT = ">5I"  # magic, scene, warmup, frames, seed
@@ -75,30 +74,23 @@ def run_one(rom_bytes: bytes, scene: int, run: int, args, out_dir: Path) -> dict
     name = f"{SCENES[scene]}.run{run}"
     patched = patch_rom(rom_bytes, scene, args.warmup, args.frames, args.seed)
 
-    # ares needs the ROM's directory to be writable
     with tempfile.TemporaryDirectory(prefix="bench-") as tmp:
         rom_path = Path(tmp) / "bench.z64"
         rom_path.write_bytes(patched)
 
-        cmd = [str(ARES_WRAPPER), "--setting", "Developer/HomebrewMode=true"]
-        if args.interpreter:
-            cmd += ["--setting", "Developer/ForceInterpreter=true"]
-        cmd.append(str(rom_path))
-
+        cmd = [str(args.runner), str(rom_path), "--wall-seconds", str(args.timeout)]
         t0 = time.monotonic()
-        try:
-            proc = subprocess.run(cmd, capture_output=True, text=True, errors="replace", timeout=args.timeout)
-            output = proc.stdout + proc.stderr
-            timed_out = False
-        except subprocess.TimeoutExpired as e:
-            output = (e.stdout or b"").decode(errors="replace") if isinstance(e.stdout, bytes) else (e.stdout or "")
-            timed_out = True
+        proc = subprocess.run(cmd, capture_output=True, text=True, errors="replace")
         elapsed = time.monotonic() - t0
+
+    output = proc.stdout
+    stop = next((l for l in proc.stderr.splitlines() if l.startswith("n64-run: stop=")), "")
+    timed_out = "stop=wall-time-limit" in stop
 
     start, columns, rows, ended = parse_output(output)
     (out_dir / f"{name}.log").write_text("\n".join(l for l in output.splitlines() if l.startswith("BENCH")) + "\n")
 
-    ok = ended and len(rows) == args.frames and not timed_out
+    ok = ended and len(rows) == args.frames and "stop=emux-exit" in stop
     if columns and rows:
         with (out_dir / f"{name}.csv").open("w") as f:
             f.write("scene,run," + ",".join(columns) + "\n")
@@ -114,14 +106,26 @@ def run_one(rom_bytes: bytes, scene: int, run: int, args, out_dir: Path) -> dict
         "frames": len(rows),
         "host_seconds": round(elapsed, 2),
         "start": start,
+        "runner_stop": stop,
     }
 
 
-def git(*a: str) -> str:
+def git(*a: str, cwd: Path = ROOT) -> str:
     try:
-        return subprocess.run(["git", *a], cwd=ROOT, capture_output=True, text=True).stdout.strip()
+        return subprocess.run(["git", *a], cwd=cwd, capture_output=True, text=True).stdout.strip()
     except OSError:
         return ""
+
+
+def build_fork_runner(fork: Path) -> Path:
+    """Builds n64-run with the fork's own build script (a no-op when up to date) and returns its path."""
+    script = fork / "tools/n64-timing/build.sh"
+    if not script.is_file():
+        sys.exit(f"error: {script} not found; set ARES_FORK to the ares timing-model fork checkout, or pass --runner")
+    proc = subprocess.run(["bash", str(script)], capture_output=True, text=True)
+    if proc.returncode != 0:
+        sys.exit(f"error: {script} failed:\n{proc.stdout}{proc.stderr}")
+    return Path(proc.stdout.strip().splitlines()[-1])
 
 
 def main():
@@ -132,17 +136,23 @@ def main():
     p.add_argument("--warmup", type=int, default=120)
     p.add_argument("--frames", type=int, default=MAX_FRAMES)
     p.add_argument("--seed", type=lambda s: int(s, 0), default=0x12345678)
-    p.add_argument("--jobs", type=int, default=1, help="parallel ares instances")
-    p.add_argument("--timeout", type=int, default=300)
-    p.add_argument("--interpreter", action="store_true", help="use the ares CPU interpreter instead of the recompiler")
+    p.add_argument("--jobs", type=int, default=1, help="parallel runner instances")
+    p.add_argument("--timeout", type=int, default=300, help="host seconds per run (n64-run --wall-seconds)")
+    p.add_argument("--runner", type=Path, default=os.environ.get("N64_RUN"),
+                   help="n64-run binary (default $N64_RUN, else build it from $ARES_FORK)")
+    p.add_argument("--fork", type=Path, default=Path(os.environ.get("ARES_FORK", DEFAULT_FORK)),
+                   help=f"ares timing-model fork checkout (default $ARES_FORK, else {DEFAULT_FORK})")
     p.add_argument("--label", default="run")
     p.add_argument("--out", type=Path, default=None)
     args = p.parse_args()
 
     if not 1 <= args.frames <= MAX_FRAMES:
         sys.exit(f"error: --frames must be 1..{MAX_FRAMES}")
-    if not shutil.which(os.environ.get("ARES", "ares")):
-        sys.exit("error: ares not found on PATH")
+    built = args.runner is None
+    if built:
+        args.runner = build_fork_runner(args.fork)
+    if not os.access(args.runner, os.X_OK):
+        sys.exit(f"error: runner {args.runner} is not executable")
 
     if args.scene == "all":
         scenes = list(range(len(SCENES)))
@@ -161,9 +171,10 @@ def main():
         "rom_md5": hashlib.md5(rom_bytes).hexdigest(),
         "git_rev": git("rev-parse", "HEAD"),
         "git_dirty": bool(git("status", "--porcelain", "--untracked-files=no")),
-        "ares": subprocess.run(["git", "-C", str(Path.home() / "src/ares"), "rev-parse", "--short", "HEAD"],
-                               capture_output=True, text=True).stdout.strip(),
-        "cpu": "interpreter" if args.interpreter else "recompiler",
+        "runner": str(args.runner),
+        "runner_sha256": hashlib.sha256(args.runner.read_bytes()).hexdigest(),
+        # Only known when bench.py built the runner itself; an explicit --runner may come from any tree.
+        "ares_fork": git("describe", "--always", "--tags", "--dirty", cwd=args.fork) if built else None,
         "warmup": args.warmup,
         "frames": args.frames,
         "seed": args.seed,

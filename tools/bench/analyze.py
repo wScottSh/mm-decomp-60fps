@@ -153,7 +153,7 @@ def single(result_dir: Path) -> None:
         f"# Bench summary: {meta['label']} ({meta['timestamp']})",
         "",
         f"- ROM md5 `{meta['rom_md5']}`, git `{meta['git_rev'][:10]}`{' (dirty)' if meta['git_dirty'] else ''}",
-        f"- ares `{meta['ares']}` {meta['cpu']}, warmup {meta['warmup']}, frames {meta['frames']}, "
+        f"- ares fork `{meta['ares_fork'] or meta['runner']}`, warmup {meta['warmup']}, frames {meta['frames']}, "
         f"seed {meta['seed']:#x}, runs {meta['runs']}, jobs {meta['jobs']}",
         f"- 1 VI = {meta['vi_ms']:.3f} ms",
         "",
