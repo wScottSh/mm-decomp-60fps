@@ -742,6 +742,10 @@ beginseg
     include "$(BUILD_DIR)/src/code/sys_flashrom.o"
     include "$(BUILD_DIR)/src/code/kanread.o"
     include "$(BUILD_DIR)/src/code/osFlash.o"
+#if BENCH
+    include "$(BUILD_DIR)/src/code/bench.o"
+    include "$(BUILD_DIR)/src/code/bench_emux.o"
+#endif
     pad_text
     pad_text
     pad_text

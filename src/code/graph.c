@@ -24,6 +24,10 @@ OSTime sGraphPrevUpdateEndTime;
 #include "z64DLF.h"
 #include "z64speed_meter.h"
 
+#if BENCH
+#include "bench.h"
+#endif
+
 #include "overlays/gamestates/ovl_daytelop/z_daytelop.h"
 #include "overlays/gamestates/ovl_file_choose/z_file_select.h"
 #include "overlays/gamestates/ovl_opening/z_opening.h"
@@ -267,7 +271,13 @@ void Graph_ExecuteAndDraw(GraphicsContext* gfxCtx, GameState* gameState) {
     gameState->unk_A3 = 0;
     Graph_SetNextGfxPool(gfxCtx);
 
+#if BENCH
+    Bench_MarkGameStart(gameState);
+#endif
     GameState_Update(gameState);
+#if BENCH
+    Bench_MarkGameEnd(gameState);
+#endif
 
     OPEN_DISPS(gfxCtx);
 
@@ -352,10 +362,18 @@ void Graph_ExecuteAndDraw(GraphicsContext* gfxCtx, GameState* gameState) {
 }
 
 void Graph_Update(GraphicsContext* gfxCtx, GameState* gameState) {
+#if BENCH
+    Bench_BeginFrame(gameState);
+#endif
+
     gameState->unk_A3 = 0;
 
     Graph_UpdateGame(gameState);
     Graph_ExecuteAndDraw(gfxCtx, gameState);
+
+#if BENCH
+    Bench_EndFrame(gfxCtx, gameState);
+#endif
 }
 
 void Graph_ThreadEntry(void* arg) {

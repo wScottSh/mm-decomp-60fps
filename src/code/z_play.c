@@ -37,6 +37,10 @@ u8 sMotionBlurStatus;
 #include "overlays/gamestates/ovl_file_choose/z_file_select.h"
 #include "libu64/debug.h"
 
+#if BENCH
+#include "bench.h"
+#endif
+
 s32 gDbgCamEnabled = false;
 u8 D_801D0D54 = false;
 
@@ -2257,7 +2261,11 @@ void Play_Init(GameState* thisx) {
     D_801D0D54 = false;
 
     FrameAdvance_Init(&this->frameAdvCtx);
+#if BENCH
+    Rand_Seed(gBenchConfig.seed);
+#else
     Rand_Seed(osGetTime());
+#endif
     Matrix_Init(&this->state);
 
     this->state.main = Play_Main;

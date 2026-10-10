@@ -3,6 +3,10 @@
 
 #include "overlays/gamestates/ovl_title/z_title.h"
 
+#if BENCH
+#include "bench.h"
+#endif
+
 void Setup_InitRegs(void) {
     XREG(2) = 0;
 
@@ -57,8 +61,12 @@ void Setup_InitImpl(SetupState* this) {
     SaveContext_Init();
     Setup_InitRegs();
 
+#if BENCH
+    Bench_Boot(&this->state);
+#else
     STOP_GAMESTATE(&this->state);
     SET_NEXT_GAMESTATE(&this->state, ConsoleLogo_Init, sizeof(ConsoleLogoState));
+#endif
 }
 
 void Setup_Destroy(GameState* thisx) {
