@@ -336,9 +336,12 @@ void Bench_EndFrame(GraphicsContext* gfxCtx, GameState* gameState) {
     r->xluBytes = sizeof(((GfxPool*)NULL)->polyXluBuffer) - THGA_GetRemaining(&gfxCtx->polyXlu);
     r->ovlBytes = sizeof(((GfxPool*)NULL)->overlayBuffer) - THGA_GetRemaining(&gfxCtx->overlay);
     r->thaFree = GameState_GetArenaSize(gameState);
-    ZeldaArena_GetSizes(&maxFree, &free, &alloc);
-    r->zeldaFree = free;
-    r->zeldaMaxFree = maxFree;
+    // Only Play sets up ZeldaArena
+    if (ZeldaArena_IsInitialized()) {
+        ZeldaArena_GetSizes(&maxFree, &free, &alloc);
+        r->zeldaFree = free;
+        r->zeldaMaxFree = maxFree;
+    }
     GetFreeArena(&maxFree, &free, &alloc);
     r->sysFree = free;
     r->benchTicks = sBenchOverheadTicks;
