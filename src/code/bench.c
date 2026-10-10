@@ -13,19 +13,30 @@
 #include "libc64/malloc.h"
 #include "libc64/qrand.h"
 #include "libc64/sprintf.h"
+#include "sys_flashrom.h"
+#include "overlays/gamestates/ovl_file_choose/z_file_select.h"
+
+typedef enum BenchKind {
+    BENCH_KIND_PLAY,       // the debug save in a Play scene at entrance, day and time
+    BENCH_KIND_FILE_SELECT // the file-select main screen, cursor on File 1, with namedFiles named files
+} BenchKind;
 
 typedef struct BenchScene {
     const char* name;
+    u8 kind;
+    u8 namedFiles;
     u16 entrance;
     u16 day;
     s32 time;
 } BenchScene;
 
 static BenchScene sBenchScenes[] = {
-    { "south_clock_town", ENTRANCE(SOUTH_CLOCK_TOWN, 0), 1, CLOCK_TIME(10, 0) },
-    { "termina_field", ENTRANCE(TERMINA_FIELD, 0), 1, CLOCK_TIME(10, 0) },
-    { "mountain_village_winter", ENTRANCE(MOUNTAIN_VILLAGE_WINTER, 0), 1, CLOCK_TIME(10, 0) },
-    { "great_bay_coast", ENTRANCE(GREAT_BAY_COAST, 0), 1, CLOCK_TIME(10, 0) },
+    { "south_clock_town", BENCH_KIND_PLAY, 0, ENTRANCE(SOUTH_CLOCK_TOWN, 0), 1, CLOCK_TIME(10, 0) },
+    { "termina_field", BENCH_KIND_PLAY, 0, ENTRANCE(TERMINA_FIELD, 0), 1, CLOCK_TIME(10, 0) },
+    { "mountain_village_winter", BENCH_KIND_PLAY, 0, ENTRANCE(MOUNTAIN_VILLAGE_WINTER, 0), 1, CLOCK_TIME(10, 0) },
+    { "great_bay_coast", BENCH_KIND_PLAY, 0, ENTRANCE(GREAT_BAY_COAST, 0), 1, CLOCK_TIME(10, 0) },
+    { "file_select_empty", BENCH_KIND_FILE_SELECT, 0, 0, 0, 0 },
+    { "file_select_named", BENCH_KIND_FILE_SELECT, 2, 0, 0, 0 },
 };
 
 typedef struct BenchRecord {
@@ -59,6 +70,11 @@ typedef struct BenchRecord {
     u32 rdramCpu;     // icache + dcache + uncached
     u32 rdramSpDma;
     u32 rdramDp;      // DP draw + DP command DMA
+    // DPC counters (RCP clocks) from the previous frame's end to this one's: Bench_EndFrame reads, then clears them
+    u32 dpcClock;
+    u32 dpcBufBusy;
+    u32 dpcPipeBusy;
+    u32 dpcTmem;
 } BenchRecord;
 
 typedef enum BenchPhase {
@@ -70,6 +86,7 @@ typedef enum BenchPhase {
 BenchConfig gBenchConfig = { BENCH_CONFIG_MAGIC, 0, 120, BENCH_MAX_FRAMES, 0x12345678 };
 
 static BenchRecord sBenchRecords[BENCH_MAX_FRAMES];
+static BenchScene* sBenchScene;
 static s32 sBenchPhase = BENCH_PHASE_WARMUP;
 static s32 sBenchFrame = 0;
 static s32 sBenchEmux = false;
@@ -106,26 +123,58 @@ static void Bench_Puts(const char* str) {
     osEPiWriteIo(gCartHandle, 0x03FF0014, len);
 }
 
-void Bench_Boot(GameState* gameState) {
-    BenchScene* scene;
+/**
+ * Writes files 1 and 2 to flash: the first namedFiles as the new save that name entry's Sram_InitSave
+ * writes for the name "A", the others and both owl saves empty, so the screen does not depend on what
+ * the cartridge's flash held before.
+ */
+static void Bench_WriteFiles(GameState* gameState, s32 namedFiles) {
+    u8* buf = THA_AllocTailAlign16(&gameState->tha, SAVE_BUFFER_SIZE);
+    s32 file;
+    s32 i;
 
-    if (gBenchConfig.scene >= ARRAY_COUNT(sBenchScenes)) {
-        gBenchConfig.scene = 0;
+    for (file = 0; file < 2; file++) {
+        bzero(buf, SAVE_BUFFER_SIZE);
+        if (file < namedFiles) {
+            Sram_InitNewSave();
+            if (file == 0) {
+                gSaveContext.save.cutsceneIndex = 0xFFF0;
+            }
+            // 'A' then blanks (D_808141F0 in z_file_nameset_data.c)
+            gSaveContext.save.saveInfo.playerData.playerName[0] = 0x0A;
+            for (i = 1; i < ARRAY_COUNT(gSaveContext.save.saveInfo.playerData.playerName); i++) {
+                gSaveContext.save.saveInfo.playerData.playerName[i] = 0x3E;
+            }
+            gSaveContext.save.saveInfo.playerData.newf[0] = 'Z';
+            gSaveContext.save.saveInfo.playerData.newf[1] = 'E';
+            gSaveContext.save.saveInfo.playerData.newf[2] = 'L';
+            gSaveContext.save.saveInfo.playerData.newf[3] = 'D';
+            gSaveContext.save.saveInfo.playerData.newf[4] = 'A';
+            gSaveContext.save.saveInfo.playerData.newf[5] = '3';
+            gSaveContext.save.saveInfo.checksum = Sram_CalcChecksum(&gSaveContext.save, sizeof(Save));
+            Lib_MemCpy(buf, &gSaveContext.save, sizeof(Save));
+            Lib_MemCpy(&buf[0x2000], &gSaveContext.save, sizeof(Save));
+        }
+        SysFlashrom_WriteSync(buf, gFlashSaveStartPages[file * 2], gFlashSpecialSaveNumPages[file * 2]);
+        bzero(buf, SAVE_BUFFER_SIZE);
+        for (i = 0; i < 2; i++) {
+            SysFlashrom_WriteSync(buf, gFlashSaveStartPages[4 + file * 2 + i], gFlashSaveNumPages[4 + file * 2 + i]);
+        }
     }
-    if (gBenchConfig.frames > BENCH_MAX_FRAMES) {
-        gBenchConfig.frames = BENCH_MAX_FRAMES;
-    }
-    scene = &sBenchScenes[gBenchConfig.scene];
+}
 
-    sBenchEmux = Bench_EmuxDetect() != 0;
+static void Bench_BootFileSelect(GameState* gameState, BenchScene* scene) {
+    // What ConsoleLogo_Init and the title screen's EnMag set on the way to file select
+    gSaveContext.flashSaveAvailable = true;
+    gSaveContext.fileNum = 0xFF;
+    gSaveContext.gameMode = GAMEMODE_FILE_SELECT;
+    Bench_WriteFiles(gameState, scene->namedFiles);
 
-    sprintf(sBenchLine,
-            "BENCH START scene=%d name=%s seed=0x%08X warmup=%d frames=%d emux=%d retrace_ticks=%u counter_hz=%u\n",
-            gBenchConfig.scene, scene->name, gBenchConfig.seed, gBenchConfig.warmup, gBenchConfig.frames, sBenchEmux,
-            (u32)gIrqMgrRetraceTime, (u32)OS_CPU_COUNTER);
-    Bench_Puts(sBenchLine);
+    STOP_GAMESTATE(gameState);
+    SET_NEXT_GAMESTATE(gameState, FileSelect_Init, sizeof(FileSelectState));
+}
 
-    Rand_Seed(gBenchConfig.seed);
+static void Bench_BootPlay(GameState* gameState, BenchScene* scene) {
     Sram_InitDebugSave();
 
     gSaveContext.buttonStatus[EQUIP_SLOT_B] = BTN_ENABLED;
@@ -157,6 +206,46 @@ void Bench_Boot(GameState* gameState) {
     SET_NEXT_GAMESTATE(gameState, Play_Init, sizeof(PlayState));
 }
 
+void Bench_Boot(GameState* gameState) {
+    if (gBenchConfig.scene >= ARRAY_COUNT(sBenchScenes)) {
+        gBenchConfig.scene = 0;
+    }
+    if (gBenchConfig.frames > BENCH_MAX_FRAMES) {
+        gBenchConfig.frames = BENCH_MAX_FRAMES;
+    }
+    sBenchScene = &sBenchScenes[gBenchConfig.scene];
+
+    sBenchEmux = Bench_EmuxDetect() != 0;
+
+    sprintf(sBenchLine,
+            "BENCH START scene=%d name=%s seed=0x%08X warmup=%d frames=%d emux=%d retrace_ticks=%u counter_hz=%u\n",
+            gBenchConfig.scene, sBenchScene->name, gBenchConfig.seed, gBenchConfig.warmup, gBenchConfig.frames,
+            sBenchEmux, (u32)gIrqMgrRetraceTime, (u32)OS_CPU_COUNTER);
+    Bench_Puts(sBenchLine);
+
+    Rand_Seed(gBenchConfig.seed);
+
+    if (sBenchScene->kind == BENCH_KIND_FILE_SELECT) {
+        Bench_BootFileSelect(gameState, sBenchScene);
+    } else {
+        Bench_BootPlay(gameState, sBenchScene);
+    }
+}
+
+/**
+ * Whether this frame is one of the scene's: a Play frame, or a file-select frame on the idle main screen.
+ * A file-select run has no other game state with frames (Setup stops before its first).
+ */
+static s32 Bench_InScene(GameState* gameState) {
+    FileSelectState* fileSelect;
+
+    if (sBenchScene->kind == BENCH_KIND_PLAY) {
+        return gameState->destroy == Play_Destroy;
+    }
+    fileSelect = (FileSelectState*)gameState;
+    return (fileSelect->menuMode == FS_MENU_MODE_CONFIG) && (fileSelect->configMode == CM_MAIN_MENU);
+}
+
 void Bench_MarkGameStart(GameState* gameState) {
     sBenchGameStart = osGetTime();
 }
@@ -179,16 +268,18 @@ static void Bench_Dump(void) {
 
     Bench_Puts("BENCH COLUMNS frame vi pre_ticks game_ticks cpu_ticks period_ticks rsp_gfx_ticks rsp_aud_ticks rdp_ticks divisor actors "
                "opa_bytes xlu_bytes ovl_bytes tha_free zelda_free zelda_max_free sys_free bench_ticks cpu_cycles "
-               "ic_miss dc_miss dc_wb rsp_cycles rsp_halted rdram_total rdram_cpu rdram_sp_dma rdram_dp\n");
+               "ic_miss dc_miss dc_wb rsp_cycles rsp_halted rdram_total rdram_cpu rdram_sp_dma rdram_dp "
+               "dpc_clock dpc_bufbusy dpc_pipebusy dpc_tmem\n");
 
     for (i = 0; i < (s32)gBenchConfig.frames; i++) {
         BenchRecord* r = &sBenchRecords[i];
 
-        sprintf(sBenchLine, "BENCH F %d %u %u %u %u %u %u %u %u %u %u %u %u %u %u %u %u %u %u %u %u %u %u %u %u %u %u %u %u\n",
+        sprintf(sBenchLine, "BENCH F %d %u %u %u %u %u %u %u %u %u %u %u %u %u %u %u %u %u %u %u %u %u %u %u %u %u %u %u %u %u %u %u %u\n",
                 i, r->vi, r->preTicks, r->gameTicks, r->cpuTicks, r->periodTicks, r->rspGfxTicks, r->rspAudTicks, r->rdpTicks, r->divisor,
                 r->actors, r->opaBytes, r->xluBytes, r->ovlBytes, r->thaFree, r->zeldaFree, r->zeldaMaxFree,
                 r->sysFree, r->benchTicks, r->cpuCycles, r->icMiss, r->dcMiss, r->dcWb, r->rspCycles, r->rspHalted,
-                r->rdramTotal, r->rdramCpu, r->rdramSpDma, r->rdramDp);
+                r->rdramTotal, r->rdramCpu, r->rdramSpDma, r->rdramDp, r->dpcClock, r->dpcBufBusy, r->dpcPipeBusy,
+                r->dpcTmem);
         Bench_Puts(sBenchLine);
     }
 
@@ -202,12 +293,19 @@ void Bench_EndFrame(GraphicsContext* gfxCtx, GameState* gameState) {
     size_t maxFree;
     size_t free;
     size_t alloc;
+    u32 dpcClock = IO_READ(DPC_CLOCK_REG);
+    u32 dpcBufBusy = IO_READ(DPC_BUFBUSY_REG);
+    u32 dpcPipeBusy = IO_READ(DPC_PIPEBUSY_REG);
+    u32 dpcTmem = IO_READ(DPC_TMEM_REG);
+
+    // The counters are 24 bits, 0.27 s at 62.5 MHz; clearing them each frame keeps one frame's count below that.
+    IO_WRITE(DPC_STATUS_REG, DPC_CLR_CLOCK_CTR | DPC_CLR_CMD_CTR | DPC_CLR_PIPE_CTR | DPC_CLR_TMEM_CTR);
 
     if (sBenchEmux) {
         Bench_XProfStop(0);
     }
 
-    if ((sBenchPhase == BENCH_PHASE_DONE) || (gameState->destroy != Play_Destroy)) {
+    if ((sBenchPhase == BENCH_PHASE_DONE) || !Bench_InScene(gameState)) {
         return;
     }
 
@@ -233,17 +331,24 @@ void Bench_EndFrame(GraphicsContext* gfxCtx, GameState* gameState) {
     r->rspAudTicks = gRSPAudioTimeTotal;
     r->rdpTicks = gRDPTimeTotal;
     r->divisor = gameState->framerateDivisor;
-    r->actors = ((PlayState*)gameState)->actorCtx.totalLoadedActors;
+    r->actors = (sBenchScene->kind == BENCH_KIND_PLAY) ? ((PlayState*)gameState)->actorCtx.totalLoadedActors : 0;
     r->opaBytes = sizeof(((GfxPool*)NULL)->polyOpaBuffer) - THGA_GetRemaining(&gfxCtx->polyOpa);
     r->xluBytes = sizeof(((GfxPool*)NULL)->polyXluBuffer) - THGA_GetRemaining(&gfxCtx->polyXlu);
     r->ovlBytes = sizeof(((GfxPool*)NULL)->overlayBuffer) - THGA_GetRemaining(&gfxCtx->overlay);
     r->thaFree = GameState_GetArenaSize(gameState);
-    ZeldaArena_GetSizes(&maxFree, &free, &alloc);
-    r->zeldaFree = free;
-    r->zeldaMaxFree = maxFree;
+    // Only Play sets up ZeldaArena
+    if (ZeldaArena_IsInitialized()) {
+        ZeldaArena_GetSizes(&maxFree, &free, &alloc);
+        r->zeldaFree = free;
+        r->zeldaMaxFree = maxFree;
+    }
     GetFreeArena(&maxFree, &free, &alloc);
     r->sysFree = free;
     r->benchTicks = sBenchOverheadTicks;
+    r->dpcClock = dpcClock;
+    r->dpcBufBusy = dpcBufBusy;
+    r->dpcPipeBusy = dpcPipeBusy;
+    r->dpcTmem = dpcTmem;
 
     if (sBenchEmux) {
         r->cpuCycles = Bench_XProfRead(0, XPROF_CPU_CYCLES);
