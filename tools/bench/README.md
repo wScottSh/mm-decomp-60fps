@@ -75,7 +75,7 @@ The file-select scenes write files 1 and 2 to flash at boot, before file select 
 new save that name entry writes for the name "A" (`Sram_InitSave`); the other files and both owl saves are
 written empty. On a console this overwrites the cartridge's flash save. A file-select frame is recorded only on
 the idle main screen (`CM_MAIN_MENU`), so the warmup starts after the fade-in. The divisor is 1, so `vi` is
-fields per game frame. `actors` is 0.
+fields per game frame. `actors`, `zelda_free` and `zelda_max_free` are 0 (only Play sets up ZeldaArena).
 
 ## Columns
 
