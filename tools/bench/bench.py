@@ -39,6 +39,8 @@ SCENES = [
     "termina_field",
     "mountain_village_winter",
     "great_bay_coast",
+    "file_select_empty",
+    "file_select_named",
 ]
 
 

@@ -46,7 +46,7 @@ recorded.
 
 All under `#if BENCH`. The build goes to `build/n64-us-bench`, with `COMPARE=0`.
 
-- `title_setup.c`: boots straight into Play with the debug save at a fixed scene, day 1 10:00 (`Bench_Boot`).
+- `title_setup.c`: boots straight into the scene (`Bench_Boot`): Play with the debug save at a fixed scene, day 1 10:00, or the file-select screen.
 - `z_play.c`: `Rand_Seed(gBenchConfig.seed)` instead of `osGetTime()`.
 - `graph.c`: timestamps around `Graph_Update` and `GameState_Update`.
 - `src/code/bench.c` and `bench_emux.s`: record buffer, IS-Viewer output, and emux opcodes.
@@ -66,8 +66,16 @@ Scenes (`sBenchScenes` in `bench.c`; keep `SCENES` in `bench.py` in sync):
 | 1 | Termina Field |
 | 2 | Mountain Village (winter, snow) |
 | 3 | Great Bay Coast |
+| 4 | `file_select_empty`: file select, both files empty |
+| 5 | `file_select_named`: file select, File 1 and File 2 named "A" |
 
-There is no input yet: Link stands at the spawn point.
+There is no input yet: Link stands at the spawn point, and the file-select cursor stays on File 1.
+
+The file-select scenes write files 1 and 2 to flash at boot, before file select loads them. A named file is the
+new save that name entry writes for the name "A" (`Sram_InitSave`); the other files and both owl saves are
+written empty. On a console this overwrites the cartridge's flash save. A file-select frame is recorded only on
+the idle main screen (`CM_MAIN_MENU`), so the warmup starts after the fade-in. The divisor is 1, so `vi` is
+fields per game frame. `actors` is 0.
 
 ## Columns
 
@@ -85,7 +93,8 @@ Times are OSTime ticks (46.875 MHz); `analyze.py` converts them to ms.
 | `zelda_free`, `zelda_max_free` | ZeldaArena free bytes and largest free block |
 | `tha_free`, `sys_free` | Always 0 in Play: the arena is fully handed to ZeldaArena |
 | `cpu_cycles` … `rdram_dp` | emux `XPROF` slot deltas: cache misses, RSP cycles and halted cycles, RDRAM bytes per bus master |
-| `rsp_cycles`, `rsp_halted` | On the fork `rsp_cycles` counts only non-halted RSP time, in 750 MHz units, and `rsp_halted` is always 0 ([wScottSh/ares#82](https://github.com/wScottSh/ares/issues/82)). So `analyze.py`'s `rsp busy %` reads 100%; use `rsp_cycles / 750e6` s as RSP busy time |
+| `rsp_cycles`, `rsp_halted` | On the fork, in 750 MHz units: `rsp_cycles` is RSP busy time and `rsp_halted` RSP halted time, so their sum is the frame's elapsed time. A fork without [wScottSh/ares#113](https://github.com/wScottSh/ares/pull/113) (the fix for [#82](https://github.com/wScottSh/ares/issues/82)) reads `rsp_halted` as 0. `analyze.py`'s `rsp busy %` is `rsp_cycles / (rsp_cycles + rsp_halted)`, so it reads 100% on such a fork |
+| `dpc_clock`, `dpc_bufbusy`, `dpc_pipebusy`, `dpc_tmem` | The DPC counters, in RCP clocks (62.5 MHz), from the previous frame end to this one: `Bench_EndFrame` reads them, then clears them. `dpc_clock` is elapsed time; `dpc_pipebusy` is the RDP's busy time, unlike `rdp_ticks`. `analyze.py` reports it as `rdp busy ms` |
 | `rdram_dp` | `DP_DRAW` plus `DP_DMA` bytes. The fork tags the pixel engine's RDRAM bursts as `DP_DRAW` (`ares/n64/ri/bus.cpp`), so framebuffer, Z and texture traffic count here and in `rdram_total` |
 | `bench_ticks` | The bench bookkeeping's own cost on the previous frame (about 0.1–0.2 ms) |
 

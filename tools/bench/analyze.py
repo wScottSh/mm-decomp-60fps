@@ -24,6 +24,8 @@ import pandas as pd
 
 # Display list buffer capacities in bytes (GfxPool, include/gfx.h)
 CAPACITY = {"opa_bytes": 0x3380 * 8, "xlu_bytes": 0x800 * 8, "ovl_bytes": 0x400 * 8}
+# The DPC counters count RCP clocks (n64brew, "Reality Display Processor/Interface", DPC_CLOCK)
+DPC_HZ = 62_500_000
 
 # Metrics compared between result sets: column -> (label, unit scale function name)
 COMPARE_METRICS = [
@@ -59,7 +61,11 @@ def load(result_dir: Path) -> tuple[pd.DataFrame, dict]:
     ms = 1000 / counter_hz
     for col in ["pre", "game", "cpu", "period", "rsp_gfx", "rsp_aud", "rdp", "bench"]:
         df[f"{col}_ms"] = df[f"{col}_ticks"] * ms
-    df["rsp_busy_pct"] = np.where(df.rsp_cycles > 0, 100 * (1 - df.rsp_halted / df.rsp_cycles.clip(lower=1)), np.nan)
+    # emux 0x0200 counts RSP busy time and 0x0201 RSP halted time; together they are the RSP's elapsed time.
+    rsp_elapsed = df.rsp_cycles + df.rsp_halted
+    df["rsp_busy_pct"] = np.where(rsp_elapsed > 0, 100 * df.rsp_cycles / rsp_elapsed.clip(lower=1), np.nan)
+    if "dpc_pipebusy" in df:
+        df["rdp_busy_ms"] = df.dpc_pipebusy / DPC_HZ * 1000
     df["lag"] = df.vi > df.divisor
     return df, meta
 
@@ -92,6 +98,7 @@ def summarize_scene(d: pd.DataFrame, vi_ms: float) -> dict:
         "rsp aud ms med": d.rsp_aud_ms.median(),
         "rdp ms med": d.rdp_ms.median(),
         "rdp ms p95": pct(d.rdp_ms, 95),
+        "rdp busy ms med (DPC_PIPEBUSY)": d.rdp_busy_ms.median() if "rdp_busy_ms" in d else float("nan"),
         "rsp busy % med": d.rsp_busy_pct.median(),
         "actors med": d.actors.median(),
         "actors max": int(d.actors.max()),
