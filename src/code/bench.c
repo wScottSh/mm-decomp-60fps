@@ -31,7 +31,7 @@ typedef struct BenchScene {
 } BenchScene;
 
 static BenchScene sBenchScenes[] = {
-    { "south_clock_town", BENCH_KIND_PLAY, 0, ENTRANCE(SOUTH_CLOCK_TOWN, 0), 1, CLOCK_TIME(10, 0) },
+    { "south_clock_town", BENCH_KIND_PLAY, 0, ENTRANCE(SOUTH_CLOCK_TOWN, 0), 1, CLOCK_TIME(12, 0) },
     { "termina_field", BENCH_KIND_PLAY, 0, ENTRANCE(TERMINA_FIELD, 0), 1, CLOCK_TIME(10, 0) },
     { "mountain_village_winter", BENCH_KIND_PLAY, 0, ENTRANCE(MOUNTAIN_VILLAGE_WINTER, 0), 1, CLOCK_TIME(10, 0) },
     { "great_bay_coast", BENCH_KIND_PLAY, 0, ENTRANCE(GREAT_BAY_COAST, 0), 1, CLOCK_TIME(10, 0) },
@@ -175,6 +175,12 @@ static void Bench_BootFileSelect(GameState* gameState, BenchScene* scene) {
 }
 
 static void Bench_BootPlay(GameState* gameState, BenchScene* scene) {
+    // What the retail route to map select sets before MapSelect_LoadGame: ConsoleLogo's fileNum, and
+    // MapSelect_Init's cutscene, form and age. SaveContext_Init leaves playerForm 0, Fierce Deity.
+    gSaveContext.fileNum = 0xFF;
+    gSaveContext.save.cutsceneIndex = 0;
+    gSaveContext.save.playerForm = PLAYER_FORM_HUMAN;
+    gSaveContext.save.linkAge = 0;
     Sram_InitDebugSave();
 
     gSaveContext.buttonStatus[EQUIP_SLOT_B] = BTN_ENABLED;
