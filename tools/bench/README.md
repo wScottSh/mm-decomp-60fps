@@ -46,7 +46,7 @@ recorded.
 
 All under `#if BENCH`. The build goes to `build/n64-us-bench`, with `COMPARE=0`.
 
-- `title_setup.c`: boots straight into the scene (`Bench_Boot`): Play with the debug save at a fixed scene, day 1 10:00, or the file-select screen.
+- `title_setup.c`: boots straight into the scene (`Bench_Boot`): Play as map select loads it (the debug save, human Link) at a fixed scene, day 1 10:00 (South Clock Town 12:00, the time map select sets), or the file-select screen.
 - `z_play.c`: `Rand_Seed(gBenchConfig.seed)` instead of `osGetTime()`.
 - `graph.c`: timestamps around `Graph_Update` and `GameState_Update`.
 - `src/code/bench.c` and `bench_emux.s`: record buffer, IS-Viewer output, and emux opcodes.
@@ -113,6 +113,8 @@ Measured on unicron (shared host, load average 2.6 before the runs and 6.2 after
 ## Fork baseline (not hardware-calibrated): 2026-10-09, retail code + bench hooks
 
 Fork `nightly-234-g253e1c8ea`, 1 run x 600 frames per scene, warmup 120, seed 0x12345678 (`analyze.py` output). Times are medians unless noted.
+
+These runs predate the human-Link boot: Link was Fierce Deity (`playerForm` 0) in all four scenes, and South Clock Town ran at 10:00.
 
 | metric | South Clock Town | Termina Field | Mountain Village | Great Bay Coast |
 |---|---|---|---|---|
