@@ -20,7 +20,7 @@ The hard part is the draw path. Play's draw code runs state machines, consumes t
 
 ## Key concepts
 
-- **Field.** One VI retrace, 1/60 s on NTSC. Every thread except graph wakes on it.
+- **Field.** One VI retrace, 1/60 s on NTSC. irqmgr, sched, padmgr and audiomgr wake on it. Graph does not.
 - **Tick or game frame.** One `Graph_Update` pass. It runs logic and draw once each and submits one gfx task (`src/code/graph.c:364-377`).
 - **Divisor.** `GameState.framerateDivisor`, a u8 (`include/z64game.h:60`). Fields per tick. It is mirrored in `R_UPDATE_RATE` (`SREG(30)`, `include/regs.h:73`) and in four globals (`src/code/game.c:22-25`).
 - **CfbInfo.** A per-task record of which framebuffer to show and for how many fields (`include/scheduler.h:19-29`). There are 3, used in rotation (`src/code/graph.c:11`, `src/code/graph.c:222-225`).
@@ -44,7 +44,7 @@ Priorities are MM's own values in `include/z64thread.h:16-27`. A higher number p
 | graph | 9 | `src/code/main.c:101` | Does not wake on retrace. | The whole game loop (below). |
 | slowly | 5 | `src/code/PreRender.c:723` | Background PreRender filtering. | |
 
-Audio synthesis runs per field and is independent of the divisor. Samples per update are `samplingFreq / refreshRate` (`src/audio/lib/heap.c:945-946`). This is cited, and so audio already has the "same real-world time" property at any image rate.
+Audio synthesis runs per field and is independent of the divisor. Samples per update are `samplingFreq / refreshRate` (`src/audio/lib/heap.c:945-946`). So audio output is already paced by VI time, not by ticks (inferred).
 
 ### The graph loop, one tick
 
