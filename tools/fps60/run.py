@@ -118,7 +118,7 @@ def script(symbols, window, noise_pin):
         per_field += [f"peek n{i}_{k} {a(PROBE_CFB_NOISE + NOISE_RECORD_SIZE * i + 4 * j)} w"
                       for i in range(CFB_COUNT) for j, k in enumerate(NOISE_RECORD)]
         end = [f"peek total_{k} {a(PROBE_NOISE_TOTALS + 4 * j)} w" for j, k in enumerate(NOISE_TOTALS)]
-    return steps + per_field * window + end + load.end_steps(probe) + ["stop"]
+    return steps + per_field * window + load.end_steps(probe) + end + ["stop"]
 
 
 def run_runner(runner, rom_bytes, steps, scene_dir, dump_frames=()):
