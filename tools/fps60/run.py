@@ -103,7 +103,7 @@ def script(symbols, window):
 
 
 def run_runner(runner, rom_bytes, steps, scene_dir, dump_frames=()):
-    """Runs one scene; returns (stdout, events, stop line, other runner lines, wall seconds)."""
+    """Runs one scene; returns (stdout, events, other runner lines, (wall s, load before, load after))."""
     scene_dir.mkdir(parents=True, exist_ok=True)
     script_path = scene_dir / "script.txt"
     script_path.write_text("\n".join(steps) + "\n")
@@ -114,9 +114,10 @@ def run_runner(runner, rom_bytes, steps, scene_dir, dump_frames=()):
                "--frames", "20000", "--wall-seconds", "1800"]
         for frame, path in dump_frames:
             cmd += ["--dump-frame", str(frame), str(path)]
+        load = os.getloadavg()[0]
         began = time.perf_counter()
         proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-        wall = time.perf_counter() - began
+        wall = (time.perf_counter() - began, load, os.getloadavg()[0])
     lines = [l[len("n64-run: "):] for l in proc.stderr.splitlines() if l.startswith("n64-run: ")]
     stop = next((l for l in lines if l.startswith("stop=")), None)
     if proc.returncode != 0 or stop is None or not stop.startswith("stop=script-stop "):
@@ -274,7 +275,7 @@ def run_scene(rom, symbols, runner, scene, out, dump_frames=()):
                "settle_tick": settle_tick, "retrace_ticks": retrace, **summarize(rows, imgs, tks)}
     (scene_dir / "summary.json").write_text(json.dumps(summary, indent=1) + "\n")
     print(f"{name}: measured {summary['fields']} fields, {summary['images']} images, {summary['ticks']} ticks "
-          f"({wall:.1f} s)", flush=True)
+          f"({wall[0]:.1f} s)", flush=True)
     return summary, wall
 
 
@@ -313,6 +314,8 @@ def main():
     p.add_argument("--scenes", default=",".join(s["name"] for s in corpus.SCENES))
     p.add_argument("--jobs", type=int, default=MAX_JOBS)
     p.add_argument("--runner", type=Path, default=Path(os.environ.get("N64_RUN", RUNNER)))
+    p.add_argument("--check-determinism", action="store_true",
+                   help="run twice into OUT/run1 and OUT/run2; fail unless every output but wall time matches")
     args = p.parse_args()
     if not 1 <= args.jobs <= MAX_JOBS:
         raise SystemExit(f"--jobs must be 1 to {MAX_JOBS}")
@@ -325,30 +328,52 @@ def main():
 
     runner_digest = check_runner(args.runner)
     rom, symbols = load_rom(args.rom, map_path)
-    args.out.mkdir(parents=True, exist_ok=True)
+    if not args.check_determinism:
+        measure(args, map_path, names, by_name, runner_digest, rom, symbols, args.out)
+        return
+    for run_dir in ("run1", "run2"):
+        measure(args, map_path, names, by_name, runner_digest, rom, symbols, args.out / run_dir)
+    files, differing = compare_trees(args.out / "run1", args.out / "run2")
+    if differing:
+        raise SystemExit(f"determinism: FAIL, {len(differing)} of {len(files)} files differ: "
+                         + " ".join(map(str, differing)))
+    print(f"determinism: PASS, {len(files)} files byte-identical ({', '.join(sorted(DETERMINISTIC_EXCLUDE))} "
+          "excluded)")
+
+
+def compare_trees(a, b):
+    def listing(root):
+        return {p.relative_to(root) for p in root.rglob("*") if p.is_file() and p.name not in DETERMINISTIC_EXCLUDE}
+    files = sorted(listing(a) | listing(b))
+    return files, [f for f in files if not (a / f).is_file() or not (b / f).is_file()
+                   or (a / f).read_bytes() != (b / f).read_bytes()]
+
+
+def measure(args, map_path, names, by_name, runner_digest, rom, symbols, out):
+    out.mkdir(parents=True, exist_ok=True)
     meta = {"rom": str(args.rom.resolve()), "rom_sha256": sha256(args.rom), "map": str(map_path.resolve()),
             "map_sha256": sha256(map_path), "runner": str(args.runner), "runner_sha256": runner_digest,
             "gBenchProbe": f"0x{symbols['gBenchProbe']:08X}", "keyframe_symbol": KEYFRAME_SYMBOL in symbols,
             "scenes": names}
-    (args.out / "meta.json").write_text(json.dumps(meta, indent=1) + "\n")
+    (out / "meta.json").write_text(json.dumps(meta, indent=1) + "\n")
 
     load_before = os.getloadavg()[0]
     began = time.perf_counter()
     with ThreadPoolExecutor(max_workers=args.jobs) as pool:
-        futures = {n: pool.submit(run_scene, rom, symbols, args.runner, by_name[n], args.out) for n in names}
+        futures = {n: pool.submit(run_scene, rom, symbols, args.runner, by_name[n], out) for n in names}
         results = {n: f.result() for n, f in futures.items()}
     total = time.perf_counter() - began
 
     summaries = [results[n][0] for n in names]
-    write_tsv(args.out / "summary.tsv", [flat(s) for s in summaries])
-    (args.out / "wall.tsv").write_text(
+    write_tsv(out / "summary.tsv", [flat(s) for s in summaries])
+    (out / "wall.tsv").write_text(
         "run\twall_s\tjobs\tload_before\tload_after\n"
-        + "".join(f"{n}\t{results[n][1]:.1f}\t{args.jobs}\t{load_before:.2f}\t{os.getloadavg()[0]:.2f}\n"
+        + "".join(f"{n}\t{results[n][1][0]:.1f}\t{args.jobs}\t{results[n][1][1]:.2f}\t{results[n][1][2]:.2f}\n"
                   for n in names)
         + f"total\t{total:.1f}\t{args.jobs}\t{load_before:.2f}\t{os.getloadavg()[0]:.2f}\n")
     fields = sum(s["fields"] for s in summaries)
     tick_count = sum(s["ticks"] for s in summaries)
-    print(f"measured {fields} fields and {tick_count} ticks over {len(names)} scenes; results in {args.out}")
+    print(f"measured {fields} fields and {tick_count} ticks over {len(names)} scenes; results in {out}")
 
 
 if __name__ == "__main__":
