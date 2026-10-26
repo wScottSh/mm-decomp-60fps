@@ -41,6 +41,7 @@ SCENES = [
     "great_bay_coast",
     "file_select_empty",
     "file_select_named",
+    "retail_boot",
 ]
 
 

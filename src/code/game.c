@@ -17,6 +17,10 @@
 #include "z64vimode.h"
 #include "z64vis.h"
 
+#if BENCH
+#include "bench.h"
+#endif
+
 #pragma increment_block_number "n64-us:128"
 
 s32 gFramerateDivisor = 1;
@@ -148,6 +152,9 @@ void GameState_DrawEnd(GraphicsContext* gfxCtx) {
 
 void GameState_GetInput(GameState* gameState) {
     PadMgr_GetInput(gameState->input, true);
+#if BENCH
+    Bench_ApplyInput(gameState);
+#endif
 }
 
 void GameState_Update(GameState* gameState) {
@@ -297,8 +304,19 @@ s32 GameState_GetArenaSize(GameState* gameState) {
     return THA_GetRemaining(&gameState->tha);
 }
 
+#if BENCH
+s32 func_80173B48(GameState* gameState) {
+    // The retail budget subtracts the last frame's RDP time, so a faster build would draw more snow,
+    // rain and dust. Pinned, every build draws what retail draws on a frame without lag.
+    if (gBenchConfig.flags & BENCH_FLAG_PIN_EFFECT_BUDGET) {
+        return OS_CYCLES_TO_NSEC(gameState->framerateDivisor * (OSTime)gBenchConfig.retraceTicks);
+    }
+    return OS_CYCLES_TO_NSEC(gameState->framerateDivisor * gIrqMgrRetraceTime) - OS_CYCLES_TO_NSEC(gRDPTimeTotal);
+}
+#else
 s32 func_80173B48(GameState* gameState) {
     s32 result = OS_CYCLES_TO_NSEC(gameState->framerateDivisor * gIrqMgrRetraceTime) - OS_CYCLES_TO_NSEC(gRDPTimeTotal);
 
     return result;
 }
+#endif

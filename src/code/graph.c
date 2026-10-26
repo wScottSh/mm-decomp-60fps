@@ -240,6 +240,9 @@ retry:
         cfb->updateRate = gameState->framerateDivisor;
 
         scTask->framebuffer = cfb;
+#if BENCH
+        Bench_TagCfb(cfb);
+#endif
     }
 
 #if MM_VERSION >= N64_US

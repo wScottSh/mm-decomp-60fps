@@ -13,12 +13,14 @@
 #include "libc64/malloc.h"
 #include "libc64/qrand.h"
 #include "libc64/sprintf.h"
+#include "libu64/pad.h"
 #include "sys_flashrom.h"
 #include "overlays/gamestates/ovl_file_choose/z_file_select.h"
 
 typedef enum BenchKind {
-    BENCH_KIND_PLAY,       // the debug save in a Play scene at entrance, day and time
-    BENCH_KIND_FILE_SELECT // the file-select main screen, cursor on File 1, with namedFiles named files
+    BENCH_KIND_PLAY,        // the debug save in a Play scene at entrance, day and time
+    BENCH_KIND_FILE_SELECT, // the file-select main screen, cursor on File 1, with namedFiles named files
+    BENCH_KIND_RETAIL       // the retail boot: console logo, then the title
 } BenchKind;
 
 typedef struct BenchScene {
@@ -37,6 +39,7 @@ static BenchScene sBenchScenes[] = {
     { "great_bay_coast", BENCH_KIND_PLAY, 0, ENTRANCE(GREAT_BAY_COAST, 0), 1, CLOCK_TIME(10, 0) },
     { "file_select_empty", BENCH_KIND_FILE_SELECT, 0, 0, 0, 0 },
     { "file_select_named", BENCH_KIND_FILE_SELECT, 2, 0, 0, 0 },
+    { "retail_boot", BENCH_KIND_RETAIL, 0, 0, 0, 0 },
 };
 
 typedef struct BenchRecord {
@@ -83,7 +86,15 @@ typedef enum BenchPhase {
     BENCH_PHASE_DONE
 } BenchPhase;
 
-BenchConfig gBenchConfig = { BENCH_CONFIG_MAGIC, 0, 120, BENCH_MAX_FRAMES, 0x12345678 };
+// retraceTicks is the gIrqMgrRetraceTime that IrqMgr measures on the fps60 runner (BENCH START line)
+BenchConfig gBenchConfig = {
+    BENCH_CONFIG_MAGIC, 0, 120, BENCH_MAX_FRAMES, 0x12345678, BENCH_FLAG_RECORD | BENCH_FLAG_PIN_EFFECT_BUDGET,
+    782715, 0, { { 0 } },
+};
+
+BenchProbe gBenchProbe;
+
+extern CfbInfo sGraphCfbInfos[3];
 
 static BenchRecord sBenchRecords[BENCH_MAX_FRAMES];
 static BenchScene* sBenchScene;
@@ -96,6 +107,8 @@ static OSTime sBenchGameStart = 0;
 static OSTime sBenchGameEnd = 0;
 static u32 sBenchOverheadTicks = 0;
 static char sBenchLine[512];
+static s32 sBenchSawFade = false;
+static OSContPad sBenchPad;
 
 /**
  * Write a NUL-terminated string to IS-Viewer at cart address 0x13FF0000.
@@ -212,14 +225,22 @@ static void Bench_BootPlay(GameState* gameState, BenchScene* scene) {
     SET_NEXT_GAMESTATE(gameState, Play_Init, sizeof(PlayState));
 }
 
-void Bench_Boot(GameState* gameState) {
+s32 Bench_Boot(GameState* gameState) {
     if (gBenchConfig.scene >= ARRAY_COUNT(sBenchScenes)) {
         gBenchConfig.scene = 0;
     }
     if (gBenchConfig.frames > BENCH_MAX_FRAMES) {
         gBenchConfig.frames = BENCH_MAX_FRAMES;
     }
+    if (gBenchConfig.inputCount > BENCH_MAX_INPUTS) {
+        gBenchConfig.inputCount = BENCH_MAX_INPUTS;
+    }
     sBenchScene = &sBenchScenes[gBenchConfig.scene];
+
+    gBenchProbe.curBuf = &gScheduler.curBuf;
+    gBenchProbe.cfbs = sGraphCfbInfos;
+    gBenchProbe.cfbSize = sizeof(CfbInfo);
+    gBenchProbe.magic = BENCH_PROBE_MAGIC;
 
     sBenchEmux = Bench_EmuxDetect() != 0;
 
@@ -233,9 +254,12 @@ void Bench_Boot(GameState* gameState) {
 
     if (sBenchScene->kind == BENCH_KIND_FILE_SELECT) {
         Bench_BootFileSelect(gameState, sBenchScene);
-    } else {
+    } else if (sBenchScene->kind == BENCH_KIND_PLAY) {
         Bench_BootPlay(gameState, sBenchScene);
+    } else {
+        return false;
     }
+    return true;
 }
 
 /**
@@ -245,7 +269,7 @@ void Bench_Boot(GameState* gameState) {
 static s32 Bench_InScene(GameState* gameState) {
     FileSelectState* fileSelect;
 
-    if (sBenchScene->kind == BENCH_KIND_PLAY) {
+    if (sBenchScene->kind != BENCH_KIND_FILE_SELECT) {
         return gameState->destroy == Play_Destroy;
     }
     fileSelect = (FileSelectState*)gameState;
@@ -261,6 +285,7 @@ void Bench_MarkGameEnd(GameState* gameState) {
 }
 
 void Bench_BeginFrame(GameState* gameState) {
+    gBenchProbe.tick++;
     sBenchFrameStart = osGetTime();
 
     if (sBenchEmux) {
@@ -292,6 +317,76 @@ static void Bench_Dump(void) {
     Bench_Puts("BENCH END\n");
 }
 
+/**
+ * A scene settles on the tick that ends its entry: a Play scene's fade-in (transitionMode goes from
+ * off to on and back to off) and any entrance cutscene, or the file-select main screen going idle.
+ * The retail boot settles on its first Play scene, the title, when it has faded in.
+ */
+static void Bench_UpdateProbe(GameState* gameState) {
+    gBenchProbe.divisor = gameState->framerateDivisor;
+
+    if (gBenchProbe.settled || !Bench_InScene(gameState)) {
+        return;
+    }
+    if (sBenchScene->kind != BENCH_KIND_FILE_SELECT) {
+        PlayState* play = (PlayState*)gameState;
+
+        if (play->transitionMode != TRANS_MODE_OFF) {
+            sBenchSawFade = true;
+            return;
+        }
+        if (!sBenchSawFade) {
+            return;
+        }
+        // A first visit opens with the scene's entrance cutscene (Termina Field, Great Bay Coast). The
+        // title is a cutscene throughout, so the retail boot settles at its fade-in.
+        if ((sBenchScene->kind == BENCH_KIND_PLAY) && (play->csCtx.state != CS_STATE_IDLE)) {
+            return;
+        }
+    }
+    gBenchProbe.settleTick = gBenchProbe.tick;
+    gBenchProbe.settled = true;
+}
+
+void Bench_TagCfb(CfbInfo* cfb) {
+    gBenchProbe.cfbTick[cfb - sGraphCfbInfos] = gBenchProbe.tick;
+}
+
+/**
+ * From the first tick after the scene settled, controller 1 reads gBenchConfig.inputs instead of the
+ * pad, with prev, press and rel derived as PadMgr_GetInputNoLock derives them, so the game sees a pad
+ * that changed on exactly that tick in every build.
+ */
+void Bench_ApplyInput(GameState* gameState) {
+    Input* input = &gameState->input[0];
+    BenchInput* entry = NULL;
+    u32 since;
+    u32 i;
+    s32 buttonDiff;
+
+    if (!gBenchProbe.settled || (gBenchConfig.inputCount == 0)) {
+        return;
+    }
+    since = gBenchProbe.tick - gBenchProbe.settleTick - 1;
+    for (i = 0; (i < gBenchConfig.inputCount) && (gBenchConfig.inputs[i].tick <= since); i++) {
+        entry = &gBenchConfig.inputs[i];
+    }
+    if (entry == NULL) {
+        sBenchPad = input->cur;
+        return;
+    }
+
+    input->prev = sBenchPad;
+    input->cur.button = entry->button;
+    input->cur.stick_x = entry->stickX;
+    input->cur.stick_y = entry->stickY;
+    buttonDiff = input->prev.button ^ input->cur.button;
+    input->press.button = input->cur.button & buttonDiff;
+    input->rel.button = input->prev.button & buttonDiff;
+    PadUtils_UpdateRelXY(input);
+    sBenchPad = input->cur;
+}
+
 void Bench_EndFrame(GraphicsContext* gfxCtx, GameState* gameState) {
     OSTime endTime = osGetTime();
     s32 retrace = gScheduler.retraceCount;
@@ -311,7 +406,9 @@ void Bench_EndFrame(GraphicsContext* gfxCtx, GameState* gameState) {
         Bench_XProfStop(0);
     }
 
-    if ((sBenchPhase == BENCH_PHASE_DONE) || !Bench_InScene(gameState)) {
+    Bench_UpdateProbe(gameState);
+
+    if (!(gBenchConfig.flags & BENCH_FLAG_RECORD) || (sBenchPhase == BENCH_PHASE_DONE) || !Bench_InScene(gameState)) {
         return;
     }
 
