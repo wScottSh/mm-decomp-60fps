@@ -92,7 +92,7 @@ A retail-architecture build presents one image per logic tick, so every image is
 
 ## Load metrics
 
-The load counters are always on in a `BENCH` build and cost nothing to read: the runner peeks RAM between fields without touching emulated timing. Perf runs use them. Units in the TSVs: CPU times are PClocks (93.75 MHz), RSP times are the runner's 750 MHz units (`XPROFREAD 0x0200`), RDP counters are RCP clocks (62.5 MHz). The summaries convert to ms. A share is ms divided by the median runner field (`stats.tsv` `cpu_cycles` per field, 16.715 ms measured).
+The load counters are always on in a `BENCH` build and cost nothing to read: the runner peeks RAM between fields without touching emulated timing. Perf runs use them, with `--noise-pin off`: with the pin on, the load includes the pin's walk on the graph thread and the RDP time that `G_PM_1PRIMITIVE` adds, which retail does not have. Units in the TSVs: CPU times are PClocks (93.75 MHz), RSP times are the runner's 750 MHz units (`XPROFREAD 0x0200`), RDP counters are RCP clocks (62.5 MHz). The summaries convert to ms. A share is ms divided by the median runner field (`stats.tsv` `cpu_cycles` per field, 16.715 ms measured).
 
 ### CPU time per thread
 

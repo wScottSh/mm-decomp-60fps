@@ -27,7 +27,8 @@ This fork of the [zeldaret/mm](https://github.com/zeldaret/mm) decompilation cha
 ```bash
 tools/fps60/worktree-setup.sh <unit> <branch>     # prepare a worktree for building
 make -j32 BENCH=1                                  # build/n64-us-bench/mm-n64-us.z64
-tools/fps60/run.py build/n64-us-bench/mm-n64-us.z64 --out RESULTS
+tools/fps60/run.py build/n64-us-bench/mm-n64-us.z64 --out RESULTS                  # fidelity: noise pin on
+tools/fps60/run.py build/n64-us-bench/mm-n64-us.z64 --out RESULTS --noise-pin off  # load: retail rendering
 tools/fps60/fidelity.py BASE_RESULTS RESULTS       # F1: keyframes against the reference
 ```
 
