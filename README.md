@@ -16,9 +16,9 @@ This fork of the [zeldaret/mm](https://github.com/zeldaret/mm) decompilation cha
 - Research is done: [frame pipeline and interpolation hazards](docs/research/mm-frame-pipeline.md) and [60 fps techniques](docs/research/fps60-techniques.md).
 - The architecture is chosen: [docs/fps60/architecture.md](docs/fps60/architecture.md). Game logic and drawing run once per tick, unchanged. The RCP then renders that tick's display list once per field: the in-between images use matrices blended between the previous and current tick, and the last image uses retail's exact bytes. It needs two more framebuffers, about 316 KiB in total (inferred).
 - Known exceptions, matching retail: the ticks where retail itself freezes the picture (opening pause, picto photos, tile captures) freeze the same way, and so does the pause screen while its background is filtered. The Bombers' Notebook stays at 20 images per second, because interpolating it would need about 600 KB (inferred).
-- The harness (`tools/fps60/`) runs six scenes deterministically and checks fidelity. Baseline: [docs/fps60/baseline.md](docs/fps60/baseline.md).
-- Retail today shows one image every 3 fields (20 fps) in every gameplay scene tested. File select lags on about a quarter of its frames.
-- Next: neutralize RDP noise in fidelity runs, measure CPU, RSP and RDP load per field, then measure the per-scene budget gap, which decides where optimization starts.
+- The harness (`tools/fps60/`) runs six scenes deterministically and checks fidelity. It also measures load: CPU busy per field and per tick (per thread, engine system and actor), RSP busy split into graphics and audio, and RDP busy. Baseline: [docs/fps60/baseline.md](docs/fps60/baseline.md).
+- Retail today shows one image every 3 fields (20 fps) in every gameplay scene tested. In each gameplay scene its busiest resource needs 1.2 to 2.2 fields per tick at the median, measured. File select lags on some of its frames.
+- Next: neutralize RDP noise in fidelity runs, then measure the per-scene budget gap, which decides where optimization starts.
 - Main risk: interpolation does not reduce render work, so every field needs a full render. The architecture estimates (inferred, from medians measured on an older fork build) that each image's RCP time must drop 1.7 to 2.3 times. The research estimates (inferred) that CPU time per tick must drop 2 to 4 times. RDP busy time in retail is not measured yet, and it decides whether 60 fps is reachable.
 
 ## Measure
@@ -58,15 +58,6 @@ still constantly evolving. If you wish to use it for modding purposes in its cur
 please be aware that the codebase could drastically change at any time. Also note that some
 parts of the ROM may not be 'shiftable' yet, so modifying them could currently be difficult.
 ```
-
-## 60 fps project
-
-This fork works toward one goal: Majora's Mask on an NTSC N64 with the Expansion Pak presents a new image on every VI field, a steady 60 fps that never swings, with nothing else changed. Resolution, textures, effects, audio, game logic and real-world game speed stay as retail. The work is engine optimization only, measured on a pinned build of the [ares timing fork](https://github.com/wScottSh/ares).
-
-- **Rules.** Game logic keeps its retail tick (Play ticks every 3 fields) and stays bit-identical per tick. The extra images come from interpolating between ticks. Fidelity is pixel-exact against retail: no tolerance band. The shipping ROM uses no emulator-only feature and fits the retail save type and size.
-- **Approach.** A frozen harness measures each change, and each optimization is one hypothesis with before and after numbers on the same corpus of scenes.
-- **Status.** The harness (`tools/fps60/`) runs a corpus of 6 scenes deterministically. It measures presentation and tick cadence, keys every image to its logic tick for the fidelity check, and measures load: CPU busy per field and per tick (per thread, per `Graph_Update` phase, per engine system and per actor), RSP busy split into gfx and audio, and RDP busy. The retail reference presents one image per 3 fields in every Play scene, and in each Play scene its busiest resource (CPU, RSP or RDP) needs 1.2 to 2.2 fields per tick at the median (`docs/fps60/baseline.md`). The budget analysis and the interpolation design come next.
-- **Measure.** `tools/fps60/README.md`: build with `make BENCH=1`, run `tools/fps60/run.py`, read `tools/fps60/report.py`.
 
 This is a WIP **decompilation** of ***The Legend of Zelda: Majora's Mask***. The purpose of the project is to recreate a source code base for the game from scratch, using information found inside the game along with static and/or dynamic analysis. **It is not, and will not, produce a PC port.** For frequently asked questions, you can visit [our website](https://zelda.deco.mp/games/mm), and for more information you can get in touch with the team on our [Discord server](https://discord.zelda.deco.mp).
 
