@@ -1,3 +1,37 @@
+# Majora's Mask at a locked 60 fps
+
+This fork of the [zeldaret/mm](https://github.com/zeldaret/mm) decompilation changes the game code so that Majora's Mask runs at a constant 60 fps on a retail N64 with the Expansion Pak. The frame rate never drops. Nothing else changes for the player: same resolution, textures, effects, audio, game logic, and real-world game speed.
+
+## Rules
+
+- **Pixel-exact.** Every image the game shows at a logic tick must match retail pixel for pixel under the same input. The in-between images must match a recorded golden set. Input may never appear on screen later than in retail. RDP dither noise is the one exception, because the console's noise generator never repeats; fidelity runs neutralize it identically in both builds and still check that the game emits the same noise commands.
+- **Same game speed.** Game logic keeps its retail tick, 20 Hz in gameplay. The extra images come from interpolating between the previous and current tick.
+- **Real hardware.** NTSC N64 with the Expansion Pak, the retail flash save, and a 32 MiB ROM. Each optimization must name a hardware mechanism with a reference. No change may rely on a quirk of the emulator.
+- **Measured, not guessed.** Each change is measured before and after on a pinned, deterministic build of the [ares timing-model fork](https://github.com/wScottSh/ares) (`tools/fps60/`). It is kept only if it helps and no scene gets worse. The target is at most 90% of a 16.7 ms field for each of the CPU, RSP and RDP, which leaves margin because the emulator is not yet calibrated against a console.
+
+## Status
+
+**Phase: building the harness.** No game code has changed yet.
+
+- Research is done: [frame pipeline and interpolation hazards](docs/research/mm-frame-pipeline.md) and [60 fps techniques](docs/research/fps60-techniques.md).
+- The harness (`tools/fps60/`) runs six scenes deterministically and checks fidelity. Baseline: [docs/fps60/baseline.md](docs/fps60/baseline.md).
+- Retail today shows one image every 3 fields (20 fps) in every gameplay scene tested. File select lags on about a quarter of its frames.
+- Next: neutralize RDP noise in fidelity runs, measure CPU, RSP and RDP load per field, and settle the interpolation architecture. Then the per-scene budget gap decides where optimization starts.
+- Main risk: retail needs roughly 2 to 4 times less CPU, RSP and RDP time per image to reach 60 fps, and interpolation does not reduce render work.
+
+## Measure
+
+```bash
+tools/fps60/worktree-setup.sh <unit> <branch>     # prepare a worktree for building
+make -j32 BENCH=1                                  # build/n64-us-bench/mm-n64-us.z64
+tools/fps60/run.py build/n64-us-bench/mm-n64-us.z64 --out RESULTS
+tools/fps60/fidelity.py BASE_RESULTS RESULTS       # F1: keyframes against the reference
+```
+
+See [tools/fps60/README.md](tools/fps60/README.md).
+
+---
+
 # Legend of Zelda: Majora's Mask (US) 1.0
 
 [![Build Status][gha-badge]][gha] [![Decompilation Progress][progress-badge]][progress] [![Contributors][contributors-badge]][contributors] [![Discord Channel][discord-badge]][discord]
