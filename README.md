@@ -11,15 +11,17 @@ This fork of the [zeldaret/mm](https://github.com/zeldaret/mm) decompilation cha
 
 ## Status
 
-**Phase: building the harness.** No retail game code has changed yet. The only source changes are benchmark hooks behind `BENCH=1`.
+**Phase: budget measured, optimization next.** No retail game code has changed yet. The only source changes are benchmark hooks behind `BENCH=1`.
 
 - Research is done: [frame pipeline and interpolation hazards](docs/research/mm-frame-pipeline.md) and [60 fps techniques](docs/research/fps60-techniques.md).
 - The architecture is chosen: [docs/fps60/architecture.md](docs/fps60/architecture.md). Game logic and drawing run once per tick, unchanged. The RCP then renders that tick's display list once per field: the in-between images use matrices blended between the previous and current tick, and the last image uses retail's exact bytes. It needs two more framebuffers, about 316 KiB in total (inferred).
 - Known exceptions, matching retail: the ticks where retail itself freezes the picture (opening pause, picto photos, tile captures) freeze the same way, and so does the pause screen while its background is filtered. The Bombers' Notebook stays at 20 images per second, because interpolating it would need about 600 KB (inferred).
 - The harness (`tools/fps60/`) runs six scenes deterministically and checks fidelity. It also measures load: CPU busy per field and per tick (per thread, engine system and actor), RSP busy split into graphics and audio, and RDP busy. Baseline: [docs/fps60/baseline.md](docs/fps60/baseline.md).
-- Retail today shows one image every 3 fields (20 fps) in every gameplay scene tested. In each gameplay scene its busiest resource needs 1.2 to 2.2 fields per tick at the median, measured. File select lags on some of its frames.
-- Next: neutralize RDP noise in fidelity runs, then measure the per-scene budget gap, which decides where optimization starts.
-- Main risk: interpolation does not reduce render work, so every field needs a full render. The architecture estimates (inferred, from medians measured on an older fork build) that each image's RCP time must drop 1.7 to 2.3 times. The research estimates (inferred) that CPU time per tick must drop 2 to 4 times. RDP busy time in retail is not measured yet, and it decides whether 60 fps is reachable.
+- Retail today shows one image every 3 fields (20 fps) in every gameplay scene tested. File select lags on some of its frames.
+- The budget is measured: [docs/fps60/budget.md](docs/fps60/budget.md). Under the chosen architecture the CPU already fits its per-tick deadline in every gameplay scene, with almost no margin in South Clock Town (0.98 of the budget at worst). The RDP (the pixel processor) is the bottleneck everywhere: each image needs 1.6 to 2.1 times its 15 ms budget, and RSP start to RDP finish takes 1.7 to 2.6 times it (measured, worst tick). The RSP is over budget in four of the five gameplay scenes (all but the title), partly because it waits on the RDP.
+- The time goes mostly to drawing the rooms' opaque geometry (about 45% of RDP time outdoors), the actors, the sky and the HUD, and the cost is mostly overhead per triangle and per texture load, not pixels (inferred from measured clocks per pixel against the hardware rate). A lower bound on RDP work that keeps every pixel identical is 0.53 to 0.76 of the budget, so no scene is ruled out by fill alone (inferred). Mountain Village is the tightest.
+- Next: neutralize RDP noise in fidelity runs (in review), then optimization units, one hypothesis each, from the ranked backlog, and the interpolation reference implementation.
+- Main risk: interpolation does not reduce render work, so every field needs a full render. Reaching 60 fps means cutting each image's RDP time about 2 times with identical pixels, mostly by removing per-triangle, texture-load and memory overhead.
 
 ## Measure
 

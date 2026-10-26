@@ -34,5 +34,5 @@ graphs/
 # - use `git config core.excludesFile path/to/my_gitignore_file`
 # - or edit `.git/info/exclude`
 
-# Benchmark output (tools/bench)
+# Output of the removed tools/bench (last version: git show c05eaddb2^:tools/bench/README.md)
 bench-results/
