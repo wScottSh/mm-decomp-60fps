@@ -12,6 +12,7 @@
  */
 
 #include "ultra64.h"
+#include "scheduler.h"
 
 struct GameState;
 struct GraphicsContext;
@@ -20,10 +21,29 @@ struct GraphicsContext;
 #define BENCH_MAX_FRAMES 600
 
 #define BENCH_CONFIG_MAGIC 0x424E4348 // "BNCH"
+#define BENCH_PROBE_MAGIC 0x50524F42  // "PROB"
+
+#define BENCH_MAX_INPUTS 512
+
+// BenchConfig.flags
+#define BENCH_FLAG_RECORD (1 << 0)            // keep per-frame records, dump them and exit (tools/bench)
+#define BENCH_FLAG_PIN_EFFECT_BUDGET (1 << 1) // func_80173B48 returns its no-lag value
 
 /**
- * Run configuration. tools/bench/bench.py finds this in a copy of the ROM by its magic and patches it,
- * so changing scenes doesn't need a rebuild.
+ * Controller 1 from the tick `tick` ticks after the scene settled (BenchProbe.settleTick) until the
+ * next entry's tick. Entries are sorted by tick.
+ */
+typedef struct BenchInput {
+    u16 tick;
+    u16 button;
+    s8 stickX;
+    s8 stickY;
+    u16 pad;
+} BenchInput;
+
+/**
+ * Run configuration. tools/bench/bench.py and tools/fps60/run.py find this in a copy of the ROM by its
+ * magic and patch it, so changing scenes doesn't need a rebuild.
  */
 typedef struct BenchConfig {
     u32 magic;
@@ -31,15 +51,39 @@ typedef struct BenchConfig {
     u32 warmup;
     u32 frames; // clamped to BENCH_MAX_FRAMES
     u32 seed;
+    u32 flags;
+    u32 retraceTicks; // the gIrqMgrRetraceTime that the pinned effect budget uses
+    u32 inputCount;   // clamped to BENCH_MAX_INPUTS
+    BenchInput inputs[BENCH_MAX_INPUTS];
 } BenchConfig;
 
 extern BenchConfig gBenchConfig;
 
-void Bench_Boot(struct GameState* gameState);
+/**
+ * What the fps60 harness reads between VI fields (tools/fps60/README.md). The layout is the harness
+ * contract: run.py reads these words by offset from the map address of gBenchProbe.
+ */
+typedef struct BenchProbe {
+    /* 0x00 */ u32 magic;
+    /* 0x04 */ u32 tick;        // logic ticks since boot; tick N runs from its Graph_Update's start
+    /* 0x08 */ u32 divisor;     // framerateDivisor after the latest tick
+    /* 0x0C */ u32 settled;     // the scene finished entering (Play fade-in done, file select idle)
+    /* 0x10 */ u32 settleTick;  // the tick that settled it
+    /* 0x14 */ CfbInfo** curBuf;      // &gScheduler.curBuf, the CfbInfo the VI shows
+    /* 0x18 */ CfbInfo* cfbs;         // sGraphCfbInfos
+    /* 0x1C */ u32 cfbSize;     // sizeof(CfbInfo)
+    /* 0x20 */ u32 cfbTick[3];  // the tick whose image each sGraphCfbInfos entry holds
+} BenchProbe;
+
+extern BenchProbe gBenchProbe;
+
+s32 Bench_Boot(struct GameState* gameState);
 void Bench_BeginFrame(struct GameState* gameState);
 void Bench_MarkGameStart(struct GameState* gameState);
 void Bench_MarkGameEnd(struct GameState* gameState);
 void Bench_EndFrame(struct GraphicsContext* gfxCtx, struct GameState* gameState);
+void Bench_TagCfb(CfbInfo* cfb);
+void Bench_ApplyInput(struct GameState* gameState);
 
 // bench_emux.s
 s32 Bench_EmuxDetect(void);

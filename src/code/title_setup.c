@@ -62,11 +62,12 @@ void Setup_InitImpl(SetupState* this) {
     Setup_InitRegs();
 
 #if BENCH
-    Bench_Boot(&this->state);
-#else
+    if (Bench_Boot(&this->state)) {
+        return;
+    }
+#endif
     STOP_GAMESTATE(&this->state);
     SET_NEXT_GAMESTATE(&this->state, ConsoleLogo_Init, sizeof(ConsoleLogoState));
-#endif
 }
 
 void Setup_Destroy(GameState* thisx) {
