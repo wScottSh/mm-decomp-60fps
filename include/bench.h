@@ -26,8 +26,8 @@ struct GraphicsContext;
 #define BENCH_MAX_INPUTS 512
 
 // BenchConfig.noisePin
-#define BENCH_NOISE_PIN_OFF 0   // retail RDP noise (perf runs)
-#define BENCH_NOISE_PIN_ON 1    // Bench_PinNoise neutralizes RDP noise in every gfx task (fidelity runs)
+#define BENCH_NOISE_PIN_OFF 0   // retail rendering (perf runs)
+#define BENCH_NOISE_PIN_ON 1    // Bench_PinNoise takes RDP timing out of every gfx task's pixels (fidelity runs)
 #define BENCH_NOISE_PIN_CHECK 2 // as ON, and every task is walked a second time to check the walk is idempotent
 
 // BenchConfig.flags
