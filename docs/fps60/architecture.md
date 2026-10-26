@@ -348,20 +348,20 @@ Play hands all remaining system heap to ZeldaArena (`src/code/game.c:206-214`, `
 
 ## Q7. Load projection
 
-Perf units measure the retail architecture and project the Replay load with these formulas until P2-ref lands. Inputs are per tick k on the retail architecture:
+Perf units measure the retail architecture and project the Replay load with these formulas until P2-ref lands. Inputs are per tick k on the retail architecture. B1 measured them on the pinned runner; [budget.md](budget.md) has the per-scene tables and the commands.
 
 | Symbol | Meaning | Source |
 |---|---|---|
-| `C_up` | Graph-thread CPU for input, `Audio_Update` and logic (`Play_Update`, cutscene manager) | `pre_ticks` plus the logic share of `game_ticks`. The logic and draw split needs one BENCH timestamp between `Play_Update` and `Play_Draw` (`src/code/z_play.c:1497-1512`). Owner H1b. |
-| `C_dr` | Graph-thread CPU for draw and list close | The draw share of `game_ticks` |
-| `C_hp` | CPU of threads above graph during the tick's `d` fields | CPU busy minus graph (H1b) |
+| `C_up` | Graph-thread CPU for input, `Audio_Update` and logic (`Play_Update`, cutscene manager) | `load_ticks.tsv` `cpu_pre + cpu_update + cpu_game` (H1b phases) |
+| `C_dr` | Graph-thread CPU for draw and list close | `cpu_draw + cpu_post` |
+| `C_hp` | CPU of the other threads during the tick's `d` fields (AudioMgr, scheduler, IRQ, pad, DMA) | `cpu_busy - graph` per tick |
 | `N_m` | Pool matrices per tick | The probe in the measurement table (measured 2 to 208) |
-| `R_g` | RSP gfx busy for the tick's task | `rsp_gfx_ticks` |
-| `R_a` | RSP audio busy for the tick's `d` audio tasks | `rsp_aud_ticks` |
-| `P` | RDP pipe busy for the tick's task | `dpc_pipebusy` |
-| `W_t` | Gfx task wall time, RSP start to RDP full sync | `rdp_ticks` |
+| `R_g` | RSP gfx busy for the tick's task, outside audio tasks | B1 task ring (`rsp - rsp_audio` from first RSP start to RDP full sync); the harness's per-tick `rsp_gfx` approximates it |
+| `R_a` | RSP audio busy per field | `load_fields.tsv` `rsp_audio` |
+| `P` | RDP busy for the tick's task | B1 task ring `rdp_buf` (`DPC_BUFBUSY`). Not `DPC_PIPEBUSY`, which in the fork holds until `SYNC_FULL` and so counts RDP time spent waiting on the RSP (H1b) |
+| `W_t` | Gfx task wall time, RSP start to RDP full sync | B1 task ring (`rdp_done - start`, retail's `gRDPTimeAcc` quantity) |
 
-Constants that P2-ref measures once with a BENCH microbench, with initial estimates (inferred, low confidence): `c_rec` 0.5 us per record, `c_save` 0.7 us per 64 B copy into the gap, `c_match` 0.5 us, `c_lerp` 2.5 us per matrix per interpolated image, `c_apply` 1.5 us per matrix per image (cold D-cache reads from the gap), `c_sub` 50 us per tick, `c_start` 30 us per image, `c_gap` 100 us per tick for the graph-thread wake, the callback, the post and the context switches between K(k-1) done and I(k,1) start. `c_lerp` holds only with the lerp specialized for d = 2 and d = 3 through constant-reciprocal multiplies. With two VR4300 `DIV` instructions per element (about 37 cycles each, inferred) it would be about 13 us. The CPU-fit conclusion below stands only after the microbench confirms these values. `T_f` is one field, 782,715 OS ticks or 16.70 ms (cited `retraceTicks`, H1a).
+Constants that P2-ref measures once with a BENCH microbench, with initial estimates (inferred, low confidence): `c_rec` 0.5 us per record, `c_save` 0.7 us per 64 B copy into the gap, `c_match` 0.5 us, `c_lerp` 2.5 us per matrix per interpolated image, `c_apply` 1.5 us per matrix per image (cold D-cache reads from the gap), `c_sub` 50 us per tick, `c_start` 30 us per image, `c_gap` 100 us per tick for the graph-thread wake, the callback, the post and the context switches between K(k-1) done and I(k,1) start. `c_lerp` holds only with the lerp specialized for d = 2 and d = 3 through constant-reciprocal multiplies. With two VR4300 `DIV` instructions per element (about 37 cycles each, inferred) it would be about 13 us. `T_f` is one field: 16.715 ms, the median runner field (measured, H1b), which the harness uses for shares. The CPU-fit conclusion below stands only after the microbench confirms these values.
 
 ```
 G   = C_up + C_dr + N_m*(c_rec + c_save + c_match + (d-1)*c_lerp) + c_sub   // graph thread, per tick
@@ -369,28 +369,32 @@ A   = d * (N_m*c_apply + c_start)                                            // 
 
 CPU tick deadline:   G + A + C_hp <= 0.9 * B * T_f
 CPU busy, field i:   min(T_f, max(0, G + A + C_hp - i*T_f)),  i = 0 .. d-1
-RSP per field:       R_g + R_a/d <= 0.9 * T_f
+RSP per field:       R_g + R_a <= 0.9 * T_f
 RDP per field:       P <= 0.9 * T_f
 First image:         W_t + N_m*c_apply + c_start + c_gap <= 0.9 * T_f
 Image j (cumulative): c_gap + sum over images 1..j of (W_t + N_m*c_apply + c_start) <= 0.9 * j * T_f
 ```
 
-Every image executes the same commands as the keyframe, so per-field RSP and RDP equal the retail per-tick values. Matrix changes can move RSP clipping and culling slightly (inferred, small). Every bound is evaluated on the worst tick in the window (max, with p99 alongside), never on the median. `W_t` runs from RSP start to RDP full sync, so the first-image bound already covers RSP and RDP together, and it is the headline RCP gate. The separate RSP and RDP lines attribute the gap to a resource.
+Every image executes the same commands as the keyframe, so per-field RSP and RDP equal the retail per-task values. Matrix changes can move RSP clipping and culling slightly (inferred, small). Every bound is evaluated on the worst tick in the window (max, with p99 alongside), never on the median. `W_t` runs from RSP start to RDP full sync, so the first-image bound already covers RSP and RDP together, and it is the headline RCP gate. The separate RSP and RDP lines attribute the gap to a resource.
 
 **BENCH counters under Replay.** Retail's `gRSPGfxTimeAcc` adds every gfx task's RSP time, so under Replay it would sum `d` renders, while `gRDPTimeAcc` is keyframe-only. The BENCH build therefore records per-image counters (RSP gfx, RDP busy, task wall time) and leaves the retail totals' meaning as retail's per task, so retail-against-Replay comparisons stay like for like.
 
-**Worked numbers, for orientation only.** The inputs are medians from the fork baseline in `tools/bench/README.md` (fork `nightly-234-g253e1c8ea`, Fierce Deity Link, not the pinned runner). B1 recomputes them on the pinned runner with max and p99 per scene. Results are inferred, at `d = 3`, `B = 3`, 90% budget 15.0 ms per field and 45.1 ms per tick, without `C_hp` beyond the preemption already inside `game ms`:
+**Worked numbers.** Measured on the pinned runner (sha256 `1f9d59f66929c5b5`) over each scene's 600-field window, at `d = 3`, `B = 3`, budget 15.04 ms per field and 45.13 ms per tick. CPU per tick is measured retail CPU busy (main ROM, which includes `C_hp`) plus the inferred Replay terms at the scene's measured `N_m` maximum. RSP, RDP and `W_t` are per task from the B1 task ring. Max / p99, in ms:
 
-| Scene | CPU per tick (`game` median + matrix terms) | RSP per field (`R_g + R_a/3`) | RDP per field |
-|---|---|---|---|
-| South Clock Town | 22.5 + 1.0 = 23.5 ms | 24.7 + 3.1 = 27.8 ms | not measured |
-| Termina Field | 22.9 + 0.5 = 23.4 ms | 18.1 + 2.5 = 20.6 ms | not measured |
-| Mountain Village | 18.1 + 0.4 = 18.5 ms | 15.8 + 1.8 = 17.6 ms | not measured |
-| Great Bay Coast | 31.0 + 1.7 = 32.7 ms | 21.9 + 2.1 = 24.0 ms | not measured |
+| Scene | `N_m` max | CPU per tick, projected (Replay terms) | RSP per field (`R_g + R_a`) | RDP per field (`P`) | `W_t` + first-image terms |
+|---|---|---|---|---|---|
+| title | 26 | 16.38 / 16.31 (0.43) | 6.31 / 6.27 | 26.75 / 26.56 | 27.10 / 26.90 |
+| South Clock Town (sct) | 145 | 44.42 / 41.91 (1.76) | 30.73 / 29.87 | 31.22 / 31.04 | 39.48 / 35.79 |
+| Termina Field | 80 | 37.60 / 37.39 (1.04) | 19.73 / 19.51 | 23.82 / 23.77 | 25.12 / 24.90 |
+| Mountain Village | 50 | 24.50 / 24.48 (0.70) | 15.99 / 15.85 | 25.38 / 25.37 | 25.80 / 25.79 |
+| Great Bay Coast | 203 | 40.57 / 40.11 (2.41) | 24.65 / 24.55 | 25.15 / 25.14 | 29.41 / 29.19 |
 
-On medians the CPU fits its per-tick deadline in every bench scene, pending the constants microbench. The headline RCP gap is `W_t`: 26.1 to 34.2 ms today (cited) against 15.0 ms, a 1.7x to 2.3x cut. RSP gfx alone is 1.2x to 1.9x over. The RDP share is unknown until B1 reports `dpc_pipebusy` (R1 open measurement 1).
+At `N_m` = 187 the Replay terms are 1.30 ms for the graph thread (`G` minus `C_up + C_dr`) and 2.23 ms with the scheduler's `A` (inferred from the constants above).
 
-**Metric conflict (gate G4).** Preferences line 3 asks for worst-case CPU busy per field at most 90%. Logic runs as one block per tick, so field 0 of each tick reads 100% busy whenever `G + A + C_hp > 0.9 T_f`, which is every Play scene today (inferred). The real constraint is the per-tick deadline. This document does not change the rule. B1 and the harness should report both forms, and the coordinator decides which one gates.
+- **CPU fits the per-tick deadline in every Play scene**, with 0.71 ms to spare in sct at max (0.98x). That margin is within the BENCH hook cost and the measured code-layout sensitivity (budget.md), so sct still needs a CPU cut. The per-field form reads 100% busy in the first field of every Play tick (inferred).
+- **The RCP does not fit.** `W_t` is 1.67x to 2.62x over budget at max (10.1 to 24.4 ms). RDP busy alone is 1.58x to 2.08x over and binds every Play scene. RSP gfx alone (`R_g`, max) is 1.07x (field) to 1.74x (sct) over in the outdoor scenes and under budget in mountain (0.96x) and title (0.32x); 3.9 ms (field, p50) to 8.2 ms (sct, max) of it per task is the RSP spinning on RDP back-pressure (`ARES_DPLOG`, measured in budget.md).
+
+**Per-field CPU rule (gate G4).** Decided by preferences line 23: CPU is judged per tick (`G + A + C_hp <= 0.9 * B * T_f`) and no image may be presented late. The per-field form is reported as information.
 
 ## Q8. Harness interface
 

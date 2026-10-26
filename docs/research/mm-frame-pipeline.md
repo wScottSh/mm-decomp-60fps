@@ -60,7 +60,7 @@ Audio synthesis runs per field and is independent of the divisor. Samples per up
 
 - A pending audio task makes a running gfx task yield (`src/code/sched.c:411-415`).
 - A gfx task that needs the RDP starts only when RSP and RDP are both idle and `Sched_TaskFramebuffersValid` passes (`src/code/sched.c:286-294`). The check fails while any swap is pending, or while the target framebuffer is on screen and not about to be replaced (`src/code/sched.c:243-253`).
-- `gRDPTimeAcc` is assigned, not summed, as RDP done minus gfx RSP start (`src/code/sched.c:390`, `src/code/sched.c:529`). It includes time the RDP waits on the RSP (cited in `tools/bench/README.md:91`).
+- `gRDPTimeAcc` is assigned, not summed, as RDP done minus gfx RSP start (`src/code/sched.c:390`, `src/code/sched.c:529`). It includes time the RDP waits on the RSP (cited in `c05eaddb2^:tools/bench/README.md:91`).
 
 ## 2. The framerate divisor
 
@@ -118,7 +118,7 @@ Leave this function on the logic divisor and the logic tick's RDP time. If it re
 - **Z-buffer and work buffer.** These are `malloc`'d from the system heap when the graph thread starts, 153,600 bytes each plus alignment (`src/code/graph.c:385-388`). The hi-res Z-buffer is never set, so `gZBufferPtr` is NULL in hi-res mode (checked at `src/code/z_play.c:1482`).
 - **Swap.** When a task completes, `Sched_TaskComplete` sets `pendingSwapBuf1`. It swaps at once only if the shown buffer's `updateTimer` is already 0 (`src/code/sched.c:307-331`). Otherwise each retrace decrements the timer and swaps at 0 (`src/code/sched.c:439-446`). `osViSwapBuffer` resets `updateTimer = updateRate` (`src/code/sched.c:45-48`). VI mode changes are applied at the same point (`src/code/sched.c:50-57`).
 - **Pipeline depth.** One image is on screen, one task is pending or running, and the CPU builds one more. `pendingSwapBuf2` exists but is unused (`include/scheduler.h:47`; inferred from grep).
-- **Lag.** If no buffer is pending when the timer reaches 0, the VI keeps showing the old image. The late task then swaps on completion (`src/code/sched.c:310-314`), so that image lasts 4 or more fields. Later ticks are not shortened to catch up, and there is no frame skip (inferred from the same lines). The bench `vi` column reads above the divisor on lag ticks (`tools/bench/README.md:86`).
+- **Lag.** If no buffer is pending when the timer reaches 0, the VI keeps showing the old image. The late task then swaps on completion (`src/code/sched.c:310-314`), so that image lasts 4 or more fields. Later ticks are not shortened to catch up, and there is no frame skip (inferred from the same lines). The bench `vi` column reads above the divisor on lag ticks (`c05eaddb2^:tools/bench/README.md:86`).
 - **Skipped swaps.** Pause-background, picto and transition-tile captures set `SREG(33) |= 1` (`src/code/z_play.c:1420`). That drops `OS_SC_SWAPBUFFER` for one task and rewinds `framebufferIndex` (`src/code/graph.c:212-216`).
 
 **Consequence for 60 fps (inferred).** At `updateRate = 1` with two buffers, the next task cannot start until the previous image is on screen (`src/code/sched.c:247-249`). The RCP gets about one field per image. A third buffer would remove that coupling. It needs `gFramebuffers[3]`, the index check, every `% 2` site (`src/code/graph.c:74`; `src/code/z_play.c:1459`, `1471`) and probably a second pending slot.
@@ -307,7 +307,7 @@ The HUD and bottle timers run on wall time. The game logic they gate (health to 
 
 The fixed buffers have no free space. Every region is used, and hi-res mode uses each whole union (`include/buffers.h:10-34`). Any extra buffer comes from the system heap, and because Play gives the whole remaining heap to ZeldaArena, it comes out of ZeldaArena (inferred from the cited allocation chain).
 
-- **One extra framebuffer** costs 153,600 B (150 KiB). The lowest bench ZeldaArena minimum is 695 KiB, in Termina Field (`tools/bench/README.md:129`, uncalibrated runner, BENCH build with a heap 66.7 KiB smaller than retail per `tools/bench/README.md:109`). About 545 KiB would remain (inferred). The worst case over the whole game is unknown.
+- **One extra framebuffer** costs 153,600 B (150 KiB). The lowest bench ZeldaArena minimum is 695 KiB, in Termina Field (`c05eaddb2^:tools/bench/README.md:129`, uncalibrated runner, BENCH build with a heap 66.7 KiB smaller than retail per `c05eaddb2^:tools/bench/README.md:109`). About 545 KiB would remain (inferred). The worst case over the whole game is unknown.
 - **A third gfx pool** would cost 131,856 B more. Two pools are enough if each render pass is its own `Graph_Update` (inferred, `src/code/graph.c:54`).
 
 ## Gotchas
