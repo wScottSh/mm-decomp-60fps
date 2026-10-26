@@ -1076,7 +1076,9 @@ void Bench_AudioFrameEnd(void) {
         }
     }
     sBenchAudioDone = sBenchAudioFrame + 1;
-    osSendMesg(&sBenchGraphGate, NULL, OS_MESG_NOBLOCK);
+    if (Bench_AudioPinned(BENCH_AUDIO_PIN_CMDS)) {
+        osSendMesg(&sBenchGraphGate, NULL, OS_MESG_NOBLOCK);
+    }
 }
 
 void Bench_AudioUpdateBegin(GameState* gameState) {
