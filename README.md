@@ -14,10 +14,12 @@ This fork of the [zeldaret/mm](https://github.com/zeldaret/mm) decompilation cha
 **Phase: building the harness.** No retail game code has changed yet. The only source changes are benchmark hooks behind `BENCH=1`.
 
 - Research is done: [frame pipeline and interpolation hazards](docs/research/mm-frame-pipeline.md) and [60 fps techniques](docs/research/fps60-techniques.md).
+- The architecture is chosen: [docs/fps60/architecture.md](docs/fps60/architecture.md). Game logic and drawing run once per tick, unchanged. The RCP then renders that tick's display list once per field: the in-between images use matrices blended between the previous and current tick, and the last image uses retail's exact bytes. It needs two more framebuffers (about 316 KiB).
+- Known exceptions, matching retail: the ticks where retail itself freezes the picture (opening pause, picto photos, tile captures) freeze the same way, and so does the pause screen while its background is filtered. The Bombers' Notebook stays at 20 images per second, because interpolating it would need about 600 KB.
 - The harness (`tools/fps60/`) runs six scenes deterministically and checks fidelity. Baseline: [docs/fps60/baseline.md](docs/fps60/baseline.md).
 - Retail today shows one image every 3 fields (20 fps) in every gameplay scene tested. File select lags on about a quarter of its frames.
-- Next: neutralize RDP noise in fidelity runs, measure CPU, RSP and RDP load per field, and settle the interpolation architecture. Then the per-scene budget gap decides where optimization starts.
-- Main risk: interpolation does not reduce render work, so every field needs a full render. The research estimates (inferred) that CPU time per tick must drop 2 to 4 times and RSP graphics time 1.3 to 2.1 times with identical output. The only route found for the RSP is optimizing MM's own microcode. RDP busy time in retail is not measured yet, and it decides whether 60 fps is reachable.
+- Next: neutralize RDP noise in fidelity runs, measure CPU, RSP and RDP load per field, then measure the per-scene budget gap, which decides where optimization starts.
+- Main risk: interpolation does not reduce render work, so every field needs a full render. The architecture estimates (inferred) that each image's RCP time must drop 1.7 to 2.3 times. The research estimates (inferred) that CPU time per tick must drop 2 to 4 times. RDP busy time in retail is not measured yet, and it decides whether 60 fps is reachable.
 
 ## Measure
 
