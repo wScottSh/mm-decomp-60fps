@@ -1,0 +1,355 @@
+#!/usr/bin/env python3
+"""Run a BENCH=1 Majora's Mask ROM through the pinned n64-run over the fps60 scene corpus.
+
+Writes per-field TSVs, the per-tick keyframe sequence, and presentation and tick-cadence summaries.
+See tools/fps60/README.md.
+"""
+
+import argparse
+import hashlib
+import json
+import os
+import re
+import struct
+import subprocess
+import sys
+import tempfile
+import time
+from collections import Counter
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import corpus  # noqa: E402
+
+RUNNER = Path.home() / "n64-timing/build/mm60-runner/rundir/bin/n64-run"
+RUNNER_SHA256_PREFIX = "1f9d59f6"  # preferences line 6
+MAX_JOBS = 4  # preferences line 14
+
+CONFIG_MAGIC = 0x424E4348  # BENCH_CONFIG_MAGIC, include/bench.h
+PROBE_MAGIC = 0x50524F42  # BENCH_PROBE_MAGIC
+FLAG_PIN_EFFECT_BUDGET = 1 << 1
+SEED = 0x12345678
+MAX_INPUTS = 512
+
+# BenchConfig and BenchProbe layouts, include/bench.h
+CFG_SCENE, CFG_WARMUP, CFG_FRAMES, CFG_SEED, CFG_FLAGS, CFG_RETRACE, CFG_INPUT_COUNT, CFG_INPUTS = (
+    4, 8, 12, 16, 20, 24, 28, 32)
+PROBE_MAGIC_OFF, PROBE_TICK, PROBE_DIVISOR, PROBE_SETTLED, PROBE_SETTLE_TICK = 0x00, 0x04, 0x08, 0x0C, 0x10
+PROBE_CUR_BUF, PROBE_CFBS, PROBE_CFB_SIZE, PROBE_CFB_TICK = 0x14, 0x18, 0x1C, 0x20
+CFB_COUNT = 3
+
+# Optional: u32 gBenchCfbKeyframe[CFB_COUNT], nonzero when that CfbInfo's image is its tick's final
+# image. A build without it presents one image per tick, so every image is a keyframe.
+KEYFRAME_SYMBOL = "gBenchCfbKeyframe"
+
+DETERMINISTIC_EXCLUDE = {"wall.tsv", "host.txt"}
+
+
+def sha256(path):
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for block in iter(lambda: f.read(1 << 20), b""):
+            h.update(block)
+    return h.hexdigest()
+
+
+def read_map(path):
+    symbols = {}
+    pattern = re.compile(r"^\s+0x([0-9a-f]{8,16})\s+([A-Za-z_]\w*)$")
+    with open(path) as f:
+        for line in f:
+            m = pattern.match(line)
+            if m:
+                symbols[m.group(2)] = int(m.group(1), 16) & 0xFFFFFFFF
+    return symbols
+
+
+def patch_rom(rom, scene):
+    data = bytearray(rom)
+    at = data.find(struct.pack(">I", CONFIG_MAGIC))
+    if at < 0 or data.find(struct.pack(">I", CONFIG_MAGIC), at + 1) >= 0:
+        raise SystemExit("ROM has no unique BenchConfig block; build it with make BENCH=1")
+    inputs = scene["inputs"]
+    if len(inputs) > MAX_INPUTS:
+        raise SystemExit(f"{scene['name']}: {len(inputs)} inputs, the ROM holds {MAX_INPUTS}")
+    if [i[0] for i in inputs] != sorted(i[0] for i in inputs):
+        raise SystemExit(f"{scene['name']}: inputs are not sorted by tick")
+    struct.pack_into(">5I", data, at + CFG_SCENE, corpus.BOOT[scene["boot"]], 0, 0, SEED, FLAG_PIN_EFFECT_BUDGET)
+    struct.pack_into(">I", data, at + CFG_INPUT_COUNT, len(inputs))
+    for n, (tick, buttons, x, y) in enumerate(inputs):
+        struct.pack_into(">HHbbH", data, at + CFG_INPUTS + 8 * n, tick, buttons, x, y, 0)
+    retrace = struct.unpack_from(">I", data, at + CFG_RETRACE)[0]
+    return bytes(data), retrace
+
+
+def script(symbols, window):
+    probe = symbols["gBenchProbe"]
+    keyframe = symbols.get(KEYFRAME_SYMBOL)
+
+    def a(off):
+        return f"0x{probe + off:08X}"
+
+    steps = [f"until {a(PROBE_MAGIC_OFF)} w == 0x{PROBE_MAGIC:08X}", f"until {a(PROBE_SETTLED)} w != 0",
+             "mark window", f"peek cfbs {a(PROBE_CFBS)} w", f"peek cfb_size {a(PROBE_CFB_SIZE)} w",
+             f"peek settle_tick {a(PROBE_SETTLE_TICK)} w"]
+    # A peek logged at frame=N reads the state after N fields, so it belongs to stats row N-1.
+    per_field = ["wait 1", f"peek tick {a(PROBE_TICK)} w", f"peek div {a(PROBE_DIVISOR)} w",
+                 f"peek cur [{a(PROBE_CUR_BUF)}] w", f"peek fb [[{a(PROBE_CUR_BUF)}]] w"]
+    per_field += [f"peek c{i} {a(PROBE_CFB_TICK + 4 * i)} w" for i in range(CFB_COUNT)]
+    if keyframe is not None:
+        per_field += [f"peek k{i} 0x{keyframe + 4 * i:08X} w" for i in range(CFB_COUNT)]
+    return steps + per_field * window + ["stop"]
+
+
+def run_runner(runner, rom_bytes, steps, scene_dir, dump_frames=()):
+    """Runs one scene; returns (stdout, events, stop line, other runner lines, wall seconds)."""
+    scene_dir.mkdir(parents=True, exist_ok=True)
+    script_path = scene_dir / "script.txt"
+    script_path.write_text("\n".join(steps) + "\n")
+    with tempfile.TemporaryDirectory(dir=scene_dir) as tmp:
+        rom_path = Path(tmp) / "rom.z64"
+        rom_path.write_bytes(rom_bytes)
+        cmd = [str(runner), str(rom_path), "--script", str(script_path), "--stats", str(scene_dir / "stats.tsv"),
+               "--frames", "20000", "--wall-seconds", "1800"]
+        for frame, path in dump_frames:
+            cmd += ["--dump-frame", str(frame), str(path)]
+        began = time.perf_counter()
+        proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        wall = time.perf_counter() - began
+    lines = [l[len("n64-run: "):] for l in proc.stderr.splitlines() if l.startswith("n64-run: ")]
+    stop = next((l for l in lines if l.startswith("stop=")), None)
+    if proc.returncode != 0 or stop is None or not stop.startswith("stop=script-stop "):
+        raise SystemExit(f"{scene_dir.name}: runner exit {proc.returncode}, {stop or proc.stderr[-800:]}")
+    events = [l for l in lines if l.startswith(("mark ", "peek "))]
+    host = [l for l in lines if l not in events]
+    failed = [l for l in lines if "unreadable" in l or "failed" in l]
+    if failed:
+        raise SystemExit(f"{scene_dir.name}: script step failed: {failed[0]}")
+    return proc.stdout, events, host, wall
+
+
+def parse_events(events):
+    marks, peeks = {}, {}
+    for e in events:
+        verb, name, frame, *rest = e.split(" ")
+        frame = int(frame.split("=")[1])
+        if verb == "mark":
+            marks[name] = frame
+        else:
+            peeks.setdefault(frame, {})[name] = int(rest[0], 16)
+    return marks, peeks
+
+
+def read_stats(path):
+    lines = Path(path).read_text().splitlines()
+    header = lines[0].split("\t")
+    return [dict(zip(header, l.split("\t"))) for l in lines[1:]]
+
+
+def per_field(name, stats, marks, peeks, window, has_keyframe):
+    if "window" not in marks:
+        raise SystemExit(f"{name}: no window mark")
+    start = marks["window"]
+    if len(stats) < start + window:
+        raise SystemExit(f"{name}: {len(stats)} stats rows, the window needs {start + window}")
+    static = peeks.get(start, {})
+    cfbs, cfb_size = static.get("cfbs"), static.get("cfb_size")
+    if cfbs is None or not cfb_size:
+        raise SystemExit(f"{name}: missing the window-start peeks")
+    rows, fb_offset = [], None
+    for i in range(window):
+        frame = start + i
+        p = peeks.get(frame + 1)
+        need = ["tick", "div", "cur", "fb"] + [f"c{k}" for k in range(CFB_COUNT)]
+        need += [f"k{k}" for k in range(CFB_COUNT)] if has_keyframe else []
+        if p is None or any(k not in p for k in need):
+            raise SystemExit(f"{name}: missing peeks for window field {i} (frame {frame})")
+        index, rem = divmod(p["cur"] - cfbs, cfb_size)
+        if rem or not 0 <= index < CFB_COUNT:
+            raise SystemExit(f"{name}: field {i}: gScheduler.curBuf 0x{p['cur']:08X} is not an sGraphCfbInfos entry")
+        origin = int(stats[frame]["origin"], 16)
+        offset = origin - (p["fb"] & 0x00FFFFFF)
+        if fb_offset is None:
+            fb_offset = offset
+        elif offset != fb_offset:
+            raise SystemExit(f"{name}: field {i}: VI origin 0x{origin:06X} is not the shown CfbInfo's framebuffer "
+                             f"0x{p['fb']:08X} + 0x{fb_offset:X}")
+        rows.append({
+            "field": i, "frame": frame, "origin": stats[frame]["origin"], "fb_hash": stats[frame]["fb_hash"],
+            "tick": p["tick"], "image_tick": p[f"c{index}"],
+            "keyframe": int(p[f"k{index}"] != 0) if has_keyframe else 1, "divisor": p["div"],
+        })
+    return rows, static["settle_tick"]
+
+
+def images(rows):
+    """Complete images: runs of fields between VI origin changes inside the window."""
+    changes = [i for i in range(1, len(rows)) if rows[i]["origin"] != rows[i - 1]["origin"]]
+    out = []
+    for a, b in zip(changes, changes[1:]):
+        span = rows[a:b]
+        tags = {(r["image_tick"], r["keyframe"]) for r in span}
+        if len(tags) != 1:
+            raise SystemExit(f"field {a}: one image carries two tick tags {sorted(tags)}")
+        out.append({"first_field": a, "fields": b - a, "image_tick": span[0]["image_tick"],
+                    "keyframe": span[0]["keyframe"], "fb_hash": span[-1]["fb_hash"],
+                    "final_frame": span[-1]["frame"],
+                    "hash_changes": sum(1 for x, y in zip(span, span[1:]) if x["fb_hash"] != y["fb_hash"])})
+    return out
+
+
+def ticks(rows):
+    """Ticks by the field their first image appears; a tick's length runs to the next tick's first image."""
+    first = {}
+    for r in rows:
+        first.setdefault(r["image_tick"], r)
+    order = sorted(first)
+    out = []
+    # The first tick may have started before the window; the last runs past its end.
+    for t, nxt in zip(order[1:], order[2:]):
+        a, b = first[t]["field"], first[nxt]["field"]
+        out.append({"tick": t, "first_field": a, "fields": b - a, "divisor": first[t]["divisor"],
+                    "skipped_after": nxt - t - 1})
+    return out
+
+
+def distribution(values):
+    c = Counter(min(v, 6) for v in values)
+    return {f"n{k}": c[k] for k in range(1, 6)} | {"n6plus": c[6]}
+
+
+def summarize(rows, imgs, tks):
+    lengths = [i["fields"] for i in imgs]
+    tick_lengths = [t["fields"] for t in tks]
+    return {
+        "fields": len(rows),
+        "images": len(imgs),
+        "fields_per_image": distribution(lengths),
+        "image_share_at_1": round(sum(1 for l in lengths if l == 1) / len(lengths), 6) if lengths else 0,
+        "image_fields_max": max(lengths, default=0),
+        "ticks": len(tks),
+        "fields_per_tick": distribution(tick_lengths),
+        "lag_ticks": sum(1 for t in tks if t["fields"] > t["divisor"]),
+        "skipped_ticks": sum(t["skipped_after"] for t in tks),
+        "tick_fields_max": max(tick_lengths, default=0),
+        "divisors": sorted({r["divisor"] for r in rows}),
+        "keyframes": sum(1 for i in imgs if i["keyframe"]),
+        "first_tick": tks[0]["tick"] if tks else None,
+        "last_tick": tks[-1]["tick"] if tks else None,
+    }
+
+
+def write_tsv(path, rows, keys=None):
+    keys = keys or list(rows[0].keys())
+    Path(path).write_text("\t".join(keys) + "\n" + "".join("\t".join(str(r[k]) for k in keys) + "\n" for r in rows))
+
+
+def run_scene(rom, symbols, runner, scene, out, dump_frames=()):
+    name = scene["name"]
+    scene_dir = out / name
+    rom_bytes, retrace = patch_rom(rom, scene)
+    window = scene.get("window", corpus.WINDOW)
+    stdout, events, host, wall = run_runner(runner, rom_bytes, script(symbols, window), scene_dir, dump_frames)
+    (scene_dir / "guest.txt").write_text(stdout)
+    (scene_dir / "events.txt").write_text("\n".join(events) + "\n")
+    (scene_dir / "host.txt").write_text("\n".join(host) + "\n")
+    m = re.search(r"BENCH START scene=(\d+) name=(\S+)", stdout)
+    if not m or m.group(2) != scene["boot"]:
+        raise SystemExit(f"{name}: the ROM booted {m.group(2) if m else 'nothing'}, not {scene['boot']}")
+    marks, peeks = parse_events(events)
+    rows, settle_tick = per_field(name, read_stats(scene_dir / "stats.tsv"), marks, peeks, window,
+                                  KEYFRAME_SYMBOL in symbols)
+    imgs, tks = images(rows), ticks(rows)
+    write_tsv(scene_dir / "fields.tsv", rows)
+    keyframes = [i for i in imgs if i["keyframe"]]
+    keys = ["image_tick", "first_field", "fields", "final_frame", "fb_hash", "hash_changes"]
+    if keyframes:
+        write_tsv(scene_dir / "keyframes.tsv", keyframes, keys)
+    else:
+        (scene_dir / "keyframes.tsv").write_text("\t".join(keys) + "\n")
+    if tks:
+        write_tsv(scene_dir / "ticks.tsv", tks)
+    summary = {"scene": name, "boot": scene["boot"], "window_start_frame": marks["window"],
+               "settle_tick": settle_tick, "retrace_ticks": retrace, **summarize(rows, imgs, tks)}
+    (scene_dir / "summary.json").write_text(json.dumps(summary, indent=1) + "\n")
+    print(f"{name}: measured {summary['fields']} fields, {summary['images']} images, {summary['ticks']} ticks "
+          f"({wall:.1f} s)", flush=True)
+    return summary, wall
+
+
+SUMMARY_COLS = ["scene", "fields", "images", "image_share_at_1", "image_fields_max", "ticks", "lag_ticks",
+                "skipped_ticks", "tick_fields_max", "divisors", "window_start_frame", "settle_tick"]
+
+
+def flat(summary):
+    row = {k: summary[k] for k in SUMMARY_COLS}
+    row["divisors"] = ",".join(map(str, summary["divisors"]))
+    row |= {f"img_{k}": v for k, v in summary["fields_per_image"].items()}
+    row |= {f"tick_{k}": v for k, v in summary["fields_per_tick"].items()}
+    return row
+
+
+def check_runner(runner):
+    digest = sha256(runner)
+    if not digest.startswith(RUNNER_SHA256_PREFIX) and not os.environ.get("FPS60_ANY_RUNNER"):
+        raise SystemExit(f"{runner}: sha256 {digest[:16]}, the pinned runner is {RUNNER_SHA256_PREFIX}")
+    return digest
+
+
+def load_rom(rom_path, map_path):
+    rom = Path(rom_path).read_bytes()
+    symbols = read_map(map_path)
+    if "gBenchProbe" not in symbols:
+        raise SystemExit(f"{map_path}: no gBenchProbe; build the ROM with make BENCH=1")
+    return rom, symbols
+
+
+def main():
+    p = argparse.ArgumentParser(description=__doc__)
+    p.add_argument("rom", type=Path, help="BENCH=1 ROM, e.g. build/n64-us-bench/mm-n64-us.z64")
+    p.add_argument("--map", type=Path, help="that build's map (default: mm-n64-us.map beside the ROM)")
+    p.add_argument("--out", type=Path, required=True)
+    p.add_argument("--scenes", default=",".join(s["name"] for s in corpus.SCENES))
+    p.add_argument("--jobs", type=int, default=MAX_JOBS)
+    p.add_argument("--runner", type=Path, default=Path(os.environ.get("N64_RUN", RUNNER)))
+    args = p.parse_args()
+    if not 1 <= args.jobs <= MAX_JOBS:
+        raise SystemExit(f"--jobs must be 1 to {MAX_JOBS}")
+    map_path = args.map or args.rom.with_suffix(".map")
+    by_name = {s["name"]: s for s in corpus.SCENES}
+    names = args.scenes.split(",")
+    unknown = [n for n in names if n not in by_name]
+    if unknown:
+        raise SystemExit(f"unknown scenes {unknown}; the corpus has {list(by_name)}")
+
+    runner_digest = check_runner(args.runner)
+    rom, symbols = load_rom(args.rom, map_path)
+    args.out.mkdir(parents=True, exist_ok=True)
+    meta = {"rom": str(args.rom.resolve()), "rom_sha256": sha256(args.rom), "map": str(map_path.resolve()),
+            "map_sha256": sha256(map_path), "runner": str(args.runner), "runner_sha256": runner_digest,
+            "gBenchProbe": f"0x{symbols['gBenchProbe']:08X}", "keyframe_symbol": KEYFRAME_SYMBOL in symbols,
+            "scenes": names}
+    (args.out / "meta.json").write_text(json.dumps(meta, indent=1) + "\n")
+
+    load_before = os.getloadavg()[0]
+    began = time.perf_counter()
+    with ThreadPoolExecutor(max_workers=args.jobs) as pool:
+        futures = {n: pool.submit(run_scene, rom, symbols, args.runner, by_name[n], args.out) for n in names}
+        results = {n: f.result() for n, f in futures.items()}
+    total = time.perf_counter() - began
+
+    summaries = [results[n][0] for n in names]
+    write_tsv(args.out / "summary.tsv", [flat(s) for s in summaries])
+    (args.out / "wall.tsv").write_text(
+        "run\twall_s\tjobs\tload_before\tload_after\n"
+        + "".join(f"{n}\t{results[n][1]:.1f}\t{args.jobs}\t{load_before:.2f}\t{os.getloadavg()[0]:.2f}\n"
+                  for n in names)
+        + f"total\t{total:.1f}\t{args.jobs}\t{load_before:.2f}\t{os.getloadavg()[0]:.2f}\n")
+    fields = sum(s["fields"] for s in summaries)
+    tick_count = sum(s["ticks"] for s in summaries)
+    print(f"measured {fields} fields and {tick_count} ticks over {len(names)} scenes; results in {args.out}")
+
+
+if __name__ == "__main__":
+    main()

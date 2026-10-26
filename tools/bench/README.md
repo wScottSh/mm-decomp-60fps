@@ -46,17 +46,18 @@ recorded.
 
 All under `#if BENCH`. The build goes to `build/n64-us-bench`, with `COMPARE=0`.
 
-- `title_setup.c`: boots straight into the scene (`Bench_Boot`): Play as map select loads it (the debug save, human Link) at a fixed scene, day 1 10:00 (South Clock Town 12:00, the time map select sets), or the file-select screen.
+- `title_setup.c`: boots straight into the scene (`Bench_Boot`): Play as map select loads it (the debug save, human Link) at a fixed scene, day 1 10:00 (South Clock Town 12:00, the time map select sets), or the file-select screen. `retail_boot` takes the retail route instead (console logo, then the title).
 - `z_play.c`: `Rand_Seed(gBenchConfig.seed)` instead of `osGetTime()`.
-- `graph.c`: timestamps around `Graph_Update` and `GameState_Update`.
-- `src/code/bench.c` and `bench_emux.s`: record buffer, IS-Viewer output, and emux opcodes.
+- `graph.c`: timestamps around `Graph_Update` and `GameState_Update`, and the tick tag on each `CfbInfo` (`Bench_TagCfb`).
+- `game.c`: the pinned effect budget (`func_80173B48`) and the tick-keyed input (`Bench_ApplyInput`), both for `tools/fps60`.
+- `src/code/bench.c` and `bench_emux.s`: record buffer, IS-Viewer output, emux opcodes, and `gBenchProbe`, which `tools/fps60/run.py` reads.
 
-`bench.py` patches the `BenchConfig` block (magic `BNCH`) in a copy of the ROM: scene, warmup, frames, seed. Changing these needs no rebuild. Records are kept in RAM during measurement and written out over IS-Viewer only at the end. The ROM then exits the emulator via emux `XIOCTL`.
+`bench.py` patches the `BenchConfig` block (magic `BNCH`) in a copy of the ROM: scene, warmup, frames, seed. Changing these needs no rebuild. It leaves the later fields at their defaults: `flags` has `BENCH_FLAG_RECORD` (keep the records, dump them, exit) and `BENCH_FLAG_PIN_EFFECT_BUDGET`, and no input. Records are kept in RAM during measurement and written out over IS-Viewer only at the end. The ROM then exits the emulator via emux `XIOCTL`.
 
-`func_80173B48` keeps its retail code. It is the effect budget: the VI time for one game frame minus the
-last frame's RDP time. Rain, snow and the dust Link kicks up scale with it. Stock ares took no emulated
-time for RDP work, so the BENCH build used to pin the budget to ignore RDP time. The fork emulates RDP
-time deterministically, so the pin is gone.
+`func_80173B48` is the effect budget: the VI time for one game frame minus the last frame's RDP time.
+Rain, snow and the dust Link kicks up scale with it. With `BENCH_FLAG_PIN_EFFECT_BUDGET` (on by default)
+it returns the no-lag value, `framerateDivisor * gBenchConfig.retraceTicks`, so a build with a faster RDP
+draws the same effects. The flag off restores the retail code. `tools/fps60/README.md` lists every pin.
 
 Scenes (`sBenchScenes` in `bench.c`; keep `SCENES` in `bench.py` in sync):
 
@@ -68,6 +69,7 @@ Scenes (`sBenchScenes` in `bench.c`; keep `SCENES` in `bench.py` in sync):
 | 3 | Great Bay Coast |
 | 4 | `file_select_empty`: file select, both files empty |
 | 5 | `file_select_named`: file select, File 1 and File 2 named "A" |
+| 6 | `retail_boot`: the retail boot, console logo then title |
 
 There is no input yet: Link stands at the spawn point, and the file-select cursor stays on File 1.
 
