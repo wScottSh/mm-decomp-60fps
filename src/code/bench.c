@@ -3,6 +3,7 @@
  */
 #include "global.h"
 #include "bench.h"
+#include "buffers.h"
 #include "carthandle.h"
 #include "gfx.h"
 #include "irqmgr.h"
@@ -13,6 +14,8 @@
 #include "libc64/sprintf.h"
 #include "libu64/pad.h"
 #include "sys_flashrom.h"
+#include "sys_ucode.h"
+#include "PR/gs2dex.h"
 #include "overlays/gamestates/ovl_file_choose/z_file_select.h"
 
 typedef enum BenchKind {
@@ -42,7 +45,7 @@ static BenchScene sBenchScenes[] = {
 
 // retraceTicks is the gIrqMgrRetraceTime that IrqMgr measures on the fps60 runner (BENCH START line)
 BenchConfig gBenchConfig = {
-    BENCH_CONFIG_MAGIC, 0, 0x12345678, BENCH_FLAG_PIN_EFFECT_BUDGET, 782715, 0, { { 0 } },
+    BENCH_CONFIG_MAGIC, 0, 0x12345678, BENCH_FLAG_PIN_EFFECT_BUDGET, 782715, 0, { { 0 } }, BENCH_NOISE_PIN_OFF,
 };
 
 BenchProbe gBenchProbe;
@@ -561,4 +564,389 @@ void Bench_ApplyInput(GameState* gameState) {
 
 void Bench_EndFrame(GraphicsContext* gfxCtx, GameState* gameState) {
     Bench_UpdateProbe(gameState);
+}
+
+/**
+ * The noise pin removes the two ways RDP timing reaches pixels, so a fidelity run's image depends on the
+ * game alone:
+ *
+ *  - Noise. The RDP's noise LFSRs step once per RDP clock (the ares fork's ares/n64/rdp/timed.hpp, from
+ *    Thar0/RDP-Noise console dumps), so a pixel that reads noise depends on when the RDP draws it.
+ *  - Span buffer coherency. Without G_PM_1PRIMITIVE the RDP prefetches the next span's color and Z before
+ *    the previous primitive's write-back lands (SDK 12.2.3; the fork's RDP::prefetch in timed.cpp), so where
+ *    primitives overlap, a read sees old or new memory depending on RDRAM contention.
+ *
+ * Just before a gfx task is sent, Bench_PinNoise walks every display list the task reaches, hashes each
+ * pinned command as the game wrote it, and rewrites it:
+ *
+ *  - G_CD_NOISE   -> G_CD_MAGICSQ. With alpha dither PATTERN or NOTPATTERN, both read the magic square.
+ *  - G_AD_NOISE   -> G_AD_PATTERN.
+ *  - G_AC_DITHER  -> G_AC_THRESHOLD (blend color alpha instead of a noise threshold).
+ *  - combiner RGB A = NOISE -> 1. NOISE is abc100000 in units of 1/256, so 1 is its mean.
+ *  - every write of the pipeline mode -> G_PM_1PRIMITIVE. Primitives drawn before a task's first such
+ *    write keep the mode the RSP starts with.
+ *
+ * The noise rules are the noise reads of the fork's RDP engine (rdp_get_dither_values,
+ * rdp_blender_alpha_reject and rdp_set_suba_input_rgb in ares/n64/rdp/engine/rdp_core.c and rdp_blend.c).
+ *
+ * Lists in asset and static memory are rewritten in place, and the rewrite stays. A log keeps each rewritten
+ * command's original words, so a later walk that meets the substitute still hashes the original. The gfx
+ * pools are rewritten every frame, so their log only lives for one walk.
+ */
+#define BENCH_NOISE_STACK 32
+#define BENCH_NOISE_MAX_VISITS 0x40000
+#define BENCH_NOISE_RDRAM_SIZE 0x800000
+#define BENCH_NOISE_SEGMENT(addr) (((addr) >> 24) & 0xF)
+
+#define BENCH_FNV_OFFSET 0x811C9DC5
+#define BENCH_FNV_PRIME 0x01000193
+
+typedef enum BenchUcode {
+    BENCH_UCODE_F3DZEX2,
+    BENCH_UCODE_S2DEX2
+} BenchUcode;
+
+typedef struct BenchNoisePatch {
+    u32 addr; // physical address of the command, 0 for an empty slot
+    Gfx orig;
+    Gfx pinned;
+} BenchNoisePatch;
+
+typedef struct BenchNoiseLog {
+    u32 mask; // entry count - 1, a power of two minus one
+    BenchNoisePatch* entries;
+} BenchNoiseLog;
+
+static BenchNoisePatch sBenchNoiseStaticEntries[1024];
+static BenchNoisePatch sBenchNoisePoolEntries[512];
+static BenchNoiseLog sBenchNoiseStatic = { ARRAY_COUNT(sBenchNoiseStaticEntries) - 1, sBenchNoiseStaticEntries };
+static BenchNoiseLog sBenchNoisePool = { ARRAY_COUNT(sBenchNoisePoolEntries) - 1, sBenchNoisePoolEntries };
+
+typedef struct BenchNoiseWalk {
+    u32 segments[16];
+    u32 stack[BENCH_NOISE_STACK];
+    s32 depth;
+    u32 rdpHalf1;
+    u8 ucode;
+    BenchNoiseRecord record;
+} BenchNoiseWalk;
+
+static BenchNoiseWalk sBenchNoiseWalk;
+
+static u32 Bench_Fnv(u32 hash, u32 word) {
+    s32 i;
+
+    for (i = 24; i >= 0; i -= 8) {
+        hash = (hash ^ ((word >> i) & 0xFF)) * BENCH_FNV_PRIME;
+    }
+    return hash;
+}
+
+/**
+ * The log slot for `addr`: its entry, or the empty slot it would take. NULL when the log is full.
+ */
+static BenchNoisePatch* Bench_NoiseSlot(u32 addr) {
+    BenchNoiseLog* log = ((addr - OS_K0_TO_PHYSICAL(gGfxPools)) < sizeof(gGfxPools)) ? &sBenchNoisePool
+                                                                                      : &sBenchNoiseStatic;
+    u32 i = ((addr >> 3) * 0x9E3779B1) >> 20;
+    u32 n;
+
+    for (n = 0; n <= log->mask; n++) {
+        BenchNoisePatch* slot = &log->entries[(i + n) & log->mask];
+
+        if ((slot->addr == addr) || (slot->addr == 0)) {
+            return slot;
+        }
+    }
+    return NULL;
+}
+
+/**
+ * The othermode bits a G_SETOTHERMODE_H/L writes (F3DEX2 encoding: shift = 32 - len - w0[15:8],
+ * len = w0[7:0] + 1).
+ */
+static u32 Bench_OtherModeMask(u32 w0) {
+    u32 len = (w0 & 0xFF) + 1;
+    u32 shift = 32 - len - ((w0 >> 8) & 0xFF);
+
+    return ((len >= 32) ? 0xFFFFFFFF : ((1 << len) - 1)) << shift;
+}
+
+/**
+ * Replaces the 2-bit field at `shift` in `*bits` by `to` if `written` covers it and it holds `noise`.
+ * A write that covers half the field leaves its result to the state before, so it counts as unknown.
+ */
+static void Bench_UnnoiseField(u32 written, u32* bits, u32 shift, u32 noise, u32 to) {
+    u32 field = (written >> shift) & 3;
+
+    if (field == 3) {
+        if (((*bits >> shift) & 3) == noise) {
+            *bits = (*bits & ~(3 << shift)) | (to << shift);
+        }
+    } else if (field != 0) {
+        gBenchProbe.noise.unknown++;
+    }
+}
+
+/**
+ * The command as the pin rewrites it. Equal to `cmd` when the pin leaves it alone.
+ */
+static Gfx Bench_PinnedCommand(Gfx cmd) {
+    u32 w0 = cmd.words.w0;
+    u32 w1 = cmd.words.w1;
+
+    switch (w0 >> 24) {
+        case G_SETOTHERMODE_H:
+            Bench_UnnoiseField(Bench_OtherModeMask(w0), &w1, G_MDSFT_RGBDITHER, 2, 0);
+            Bench_UnnoiseField(Bench_OtherModeMask(w0), &w1, G_MDSFT_ALPHADITHER, 2, 0);
+            if (Bench_OtherModeMask(w0) & G_PM_1PRIMITIVE) {
+                w1 |= G_PM_1PRIMITIVE;
+            }
+            break;
+
+        case G_SETOTHERMODE_L:
+            Bench_UnnoiseField(Bench_OtherModeMask(w0), &w1, G_MDSFT_ALPHACOMPARE, 3, 1);
+            break;
+
+        case G_RDPSETOTHERMODE:
+            Bench_UnnoiseField(0xFFFFFF, &w0, G_MDSFT_RGBDITHER, 2, 0);
+            Bench_UnnoiseField(0xFFFFFF, &w0, G_MDSFT_ALPHADITHER, 2, 0);
+            w0 |= G_PM_1PRIMITIVE;
+            Bench_UnnoiseField(0xFFFFFFFF, &w1, G_MDSFT_ALPHACOMPARE, 3, 1);
+            break;
+
+        case G_SETCOMBINE:
+            // RGB A of cycle 0 is w0[23:20], of cycle 1 w0[8:5]
+            if (((w0 >> 20) & 0xF) == G_CCMUX_NOISE) {
+                w0 = (w0 & ~(0xF << 20)) | (G_CCMUX_1 << 20);
+            }
+            if (((w0 >> 5) & 0xF) == G_CCMUX_NOISE) {
+                w0 = (w0 & ~(0xF << 5)) | (G_CCMUX_1 << 5);
+            }
+            break;
+
+        default:
+            break;
+    }
+    cmd.words.w0 = w0;
+    cmd.words.w1 = w1;
+    return cmd;
+}
+
+/**
+ * Whether the command writes any field the pin rewrites, so that adding, dropping or changing it can change
+ * the pinned image. G_RDPSETOTHERMODE and G_SETCOMBINE always do.
+ */
+static s32 Bench_PinCovers(Gfx cmd) {
+    u32 w0 = cmd.words.w0;
+
+    switch (w0 >> 24) {
+        case G_SETOTHERMODE_H:
+            return (Bench_OtherModeMask(w0) &
+                    ((3 << G_MDSFT_RGBDITHER) | (3 << G_MDSFT_ALPHADITHER) | G_PM_1PRIMITIVE)) != 0;
+
+        case G_SETOTHERMODE_L:
+            return (Bench_OtherModeMask(w0) & (3 << G_MDSFT_ALPHACOMPARE)) != 0;
+
+        default:
+            return true;
+    }
+}
+
+static void Bench_NoiseCommand(BenchNoiseWalk* walk, Gfx* cmd, u32 addr) {
+    BenchNoisePatch* slot = Bench_NoiseSlot(addr);
+    Gfx orig = *cmd;
+    Gfx pinned;
+
+    if ((slot != NULL) && (slot->addr == addr) && (slot->pinned.words.w0 == cmd->words.w0) &&
+        (slot->pinned.words.w1 == cmd->words.w1)) {
+        orig = slot->orig;
+        pinned = *cmd;
+    } else {
+        pinned = Bench_PinnedCommand(orig);
+        if ((pinned.words.w0 == orig.words.w0) && (pinned.words.w1 == orig.words.w1)) {
+            if ((slot != NULL) && (slot->addr == addr)) {
+                // The game rewrote this command since a walk pinned it; G_NOOP never matches a later read.
+                slot->pinned.words.w0 = G_NOOP << 24;
+            }
+            if (!Bench_PinCovers(orig)) {
+                return;
+            }
+        } else {
+            if (slot == NULL) {
+                gBenchProbe.noise.overflow++;
+            } else {
+                slot->addr = addr;
+                slot->orig = orig;
+                slot->pinned = pinned;
+            }
+            *cmd = pinned;
+            walk->record.patched++;
+        }
+    }
+    walk->record.commands++;
+    walk->record.hash = Bench_Fnv(Bench_Fnv(walk->record.hash, orig.words.w0), orig.words.w1);
+}
+
+/**
+ * A display list address as the RSP resolves it (segment base + offset, 24 bits), or 0 when it is outside
+ * RDRAM, unaligned, or in a segment that was never set.
+ */
+static u32 Bench_NoiseResolve(BenchNoiseWalk* walk, u32 addr) {
+    u32 segment = BENCH_NOISE_SEGMENT(addr);
+    u32 phys;
+
+    if ((segment != 0) && (walk->segments[segment] == 0)) {
+        return 0;
+    }
+    phys = (walk->segments[segment] + (addr & 0xFFFFFF)) & 0xFFFFFF;
+    if ((phys == 0) || (phys >= BENCH_NOISE_RDRAM_SIZE) || (phys & 7)) {
+        return 0;
+    }
+    return phys;
+}
+
+static s32 Bench_NoiseKnownOpcode(BenchNoiseWalk* walk, u32 op) {
+    if (op >= G_SPECIAL_3) {
+        return true;
+    }
+    if (walk->ucode == BENCH_UCODE_F3DZEX2) {
+        return op <= G_LINE3D;
+    }
+    // S2DEX2 (gs2dex.h, F3DEX_GBI_2): 0x03 is unused and G_SELECT_DL's branch is not followed
+    return (op <= G_OBJ_RENDERMODE) && (op != 0x03) && (op != G_SELECT_DL);
+}
+
+/**
+ * Pushes the return address for a call, or counts an overflow. Returns whether the call can be followed.
+ */
+static s32 Bench_NoisePush(BenchNoiseWalk* walk, u32 ret) {
+    if (walk->depth >= BENCH_NOISE_STACK) {
+        gBenchProbe.noise.overflow++;
+        return false;
+    }
+    walk->stack[walk->depth++] = ret;
+    return true;
+}
+
+static void Bench_NoiseWalk(BenchNoiseWalk* walk, u32 pc) {
+    u32 visits = 0;
+
+    while (pc != 0) {
+        Gfx* cmd = OS_PHYSICAL_TO_K0(pc);
+        u32 op = cmd->words.w0 >> 24;
+        u32 next = pc + sizeof(Gfx);
+        u32 target;
+
+        if (++visits > BENCH_NOISE_MAX_VISITS) {
+            gBenchProbe.noise.overflow++;
+            break;
+        }
+        walk->record.visited++;
+
+        if (!Bench_NoiseKnownOpcode(walk, op)) {
+            gBenchProbe.noise.unknown++;
+        }
+
+        switch (op) {
+            case G_DL:
+                target = Bench_NoiseResolve(walk, cmd->words.w1);
+                if (target == 0) {
+                    gBenchProbe.noise.unresolved++;
+                } else if (((cmd->words.w0 >> 16) & 0xFF) == G_DL_NOPUSH) {
+                    next = target;
+                } else if (Bench_NoisePush(walk, next)) {
+                    next = target;
+                }
+                break;
+
+            case G_ENDDL:
+                next = (walk->depth > 0) ? walk->stack[--walk->depth] : 0;
+                break;
+
+            case G_BRANCH_Z:
+                // Whether the RSP branches depends on a vertex's depth, so the walk takes both paths: the
+                // branch first, then the commands after it.
+                if (walk->ucode == BENCH_UCODE_F3DZEX2) {
+                    target = Bench_NoiseResolve(walk, walk->rdpHalf1);
+                    if (target == 0) {
+                        gBenchProbe.noise.unresolved++;
+                    } else if (Bench_NoisePush(walk, next)) {
+                        next = target;
+                    }
+                }
+                break;
+
+            case G_RDPHALF_1:
+                walk->rdpHalf1 = cmd->words.w1;
+                break;
+
+            case G_MOVEWORD:
+                if (((cmd->words.w0 >> 16) & 0xFF) == G_MW_SEGMENT) {
+                    walk->segments[((cmd->words.w0 & 0xFFFF) >> 2) & 0xF] = cmd->words.w1;
+                }
+                break;
+
+            case G_LOAD_UCODE:
+                if ((cmd->words.w1 & 0xFFFFFF) == (OS_K0_TO_PHYSICAL(gspS2DEX2_fifoTextStart) & 0xFFFFFF)) {
+                    walk->ucode = BENCH_UCODE_S2DEX2;
+                } else if ((cmd->words.w1 & 0xFFFFFF) == (OS_K0_TO_PHYSICAL(SysUcode_GetUCode()) & 0xFFFFFF)) {
+                    walk->ucode = BENCH_UCODE_F3DZEX2;
+                } else {
+                    gBenchProbe.noise.unknown++;
+                }
+                break;
+
+            case G_SETOTHERMODE_H:
+            case G_SETOTHERMODE_L:
+            case G_RDPSETOTHERMODE:
+            case G_SETCOMBINE:
+                Bench_NoiseCommand(walk, cmd, pc);
+                break;
+
+            default:
+                break;
+        }
+        pc = next;
+    }
+}
+
+/**
+ * With gBenchConfig.noisePin set, walks the task's display lists (see above) and records the walk for the
+ * tick whose image `cfb` will hold. Runs after the previous gfx task finished, so the RCP reads none of
+ * the lists it rewrites, and before Sched writes the data cache back for the task.
+ */
+static void Bench_NoiseWalkTask(BenchNoiseWalk* walk, Gfx* taskList) {
+    bzero(walk, sizeof(*walk));
+    walk->ucode = BENCH_UCODE_F3DZEX2;
+    walk->record.hash = BENCH_FNV_OFFSET;
+    Bench_NoiseWalk(walk, OS_K0_TO_PHYSICAL(taskList));
+}
+
+void Bench_PinNoise(CfbInfo* cfb, Gfx* taskList) {
+    BenchNoiseWalk* walk = &sBenchNoiseWalk;
+    BenchNoiseRecord first;
+
+    if (gBenchConfig.noisePin == BENCH_NOISE_PIN_OFF) {
+        return;
+    }
+
+    bzero(sBenchNoisePoolEntries, sizeof(sBenchNoisePoolEntries));
+    Bench_NoiseWalkTask(walk, taskList);
+
+    if (gBenchConfig.noisePin == BENCH_NOISE_PIN_CHECK) {
+        first = walk->record;
+        Bench_NoiseWalkTask(walk, taskList);
+        if ((walk->record.hash != first.hash) || (walk->record.commands != first.commands) ||
+            (walk->record.visited != first.visited) || (walk->record.patched != 0)) {
+            gBenchProbe.noise.mismatch++;
+        }
+        walk->record = first;
+    }
+
+    gBenchProbe.cfbNoise[cfb - sGraphCfbInfos] = walk->record;
+    gBenchProbe.noise.walks++;
+    gBenchProbe.noise.visited += walk->record.visited;
+    gBenchProbe.noise.commands += walk->record.commands;
+    gBenchProbe.noise.patched += walk->record.patched;
 }

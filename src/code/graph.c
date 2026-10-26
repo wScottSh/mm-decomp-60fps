@@ -248,6 +248,7 @@ retry:
         scTask->framebuffer = cfb;
 #if BENCH
         Bench_TagCfb(cfb);
+        Bench_PinNoise(cfb, (Gfx*)task->data_ptr);
 #endif
     }
 

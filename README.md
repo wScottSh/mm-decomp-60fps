@@ -4,14 +4,14 @@ This fork of the [zeldaret/mm](https://github.com/zeldaret/mm) decompilation cha
 
 ## Rules
 
-- **Pixel-exact.** Every image the game shows at a logic tick must match retail pixel for pixel under the same input. The in-between images must match a recorded golden set. Input may never appear on screen later than in retail. RDP dither noise is the one exception, because the console's noise generator never repeats. Fidelity runs will neutralize it identically in both builds and still check that the game emits the same noise commands (in progress).
+- **Pixel-exact.** Every image the game shows at a logic tick must match retail pixel for pixel under the same input. The in-between images must match a recorded golden set. Input may never appear on screen later than in retail. RDP timing is the one exception: the console's noise generator never repeats, and where primitives overlap the RDP can read stale memory depending on bus contention. Fidelity runs neutralize both identically in both builds (the noise pin) and still check that the game emits the same noise and pipeline-mode commands.
 - **Same game speed.** Game logic keeps its retail tick, 20 Hz in gameplay. The extra images come from interpolating between the previous and current tick.
 - **Real hardware.** NTSC N64 with the Expansion Pak, the retail flash save, and a 32 MiB ROM. Each optimization must name a hardware mechanism with a reference. No change may rely on a quirk of the emulator.
 - **Measured, not guessed.** Each change is measured before and after on a pinned, deterministic build of the [ares timing-model fork](https://github.com/wScottSh/ares) (`tools/fps60/`). It is kept only if it helps and no scene gets worse. The target is at most 90% of a 16.7 ms field for each of the CPU, RSP and RDP, which leaves margin because the emulator is not yet calibrated against a console.
 
 ## Status
 
-**Phase: budget measured, optimization next.** No retail game code has changed yet. The only source changes are benchmark hooks behind `BENCH=1`.
+**Phase: optimization.** Retail game code changes only where a measured unit proved it keeps every image identical. Benchmark hooks stay behind `BENCH=1`.
 
 - Research is done: [frame pipeline and interpolation hazards](docs/research/mm-frame-pipeline.md) and [60 fps techniques](docs/research/fps60-techniques.md).
 - The architecture is chosen: [docs/fps60/architecture.md](docs/fps60/architecture.md). Game logic and drawing run once per tick, unchanged. The RCP then renders that tick's display list once per field: the in-between images use matrices blended between the previous and current tick, and the last image uses retail's exact bytes. It needs two more framebuffers, about 316 KiB in total (inferred).
@@ -22,8 +22,10 @@ This fork of the [zeldaret/mm](https://github.com/zeldaret/mm) decompilation cha
 - The time goes mostly to drawing the rooms' opaque geometry (about 45% of RDP time outdoors), the actors, the sky and the HUD. A lower bound on RDP work that keeps every pixel identical is 0.53 to 0.76 of the budget, so no scene is ruled out by fill alone (inferred). Mountain Village is the tightest.
 - Where the RDP time goes is now measured per cause: [docs/research/rdp-levers.md](docs/research/rdp-levers.md). On the emulator, 37 to 45% of RDP time in gameplay is waiting for memory on each short row of pixels a triangle draws, and 11 to 27% is texture loads. Per-triangle setup costs almost nothing. The emulator's memory timing is the part that fails its own hardware checks, and no console data exists for short rows, so this split still needs a console measurement.
 - Optimizations found that keep every pixel identical: drawing the sky in one RDP cycle when its second texture has no effect (1.0 to 1.7 ms per image in every scene; file select stops lagging), drawing a flat-colored sky as one rectangle (2.5 ms in Mountain Village), and skipping repeated texture loads (1.0 ms for Great Bay's seagulls; about 0.4 to 0.8 ms more per scene, inferred). These are prototypes, measured but not merged.
-- They are not enough: together they remove 12 to 33% of the RDP gap. A gate is open: identical-output changes alone cannot bring any gameplay scene under budget on the emulator, and the next step is a console measurement of the memory cost of short pixel rows.
-- Next: neutralize RDP noise in fidelity runs (in review), then optimization units, one hypothesis each, from the ranked backlog, and the interpolation reference implementation.
+- They are not enough: together they remove 12 to 30% of the RDP gap (measured on the emulator; 33% counting one inferred change whose emulator basis fails its hardware checks). A gate is open: identical-output changes alone cannot bring any gameplay scene under budget on the emulator, and the next step is a console measurement of the memory cost of short pixel rows. The emulator is not shown to overstate the gap: its memory terms err in both directions against console data, and the one console measurement of this game (file select) runs about 16% slower than the emulator.
+- The noise pin is in: fidelity runs neutralize RDP noise and stale span-buffer reads identically in both builds, and hash every noise-related and pipeline-mode command as the game emitted it, so a build that changes those commands still fails. With the pin on, a build that only adds dead code passes F1 in all six scenes. A one-pixel change fails at exactly its tick, and so does one added, dropped or changed noise or pipeline-mode command (measured).
+- First CPU optimization: the two matrix functions every skeleton limb calls (`Matrix_TranslateRotateZYX`, `Matrix_MtxFToMtx`) run as loops instead of unrolled code, with the same float operations in the same order. They miss the instruction cache less, so the graph thread spends 0.5 ms less per tick in Great Bay and about 0.3 ms less in South Clock Town, against a control build with the same cache layout (measured). Every matrix is bit-identical to retail (measured over 276,608 in-ROM test cases), and F1 passes in all six scenes.
+- Next: more optimization units, one hypothesis each, from the ranked backlog, and the interpolation reference implementation.
 - Main risk: interpolation does not reduce render work, so every field needs a full render. Reaching 60 fps means cutting each image's RDP time about 2 times with identical pixels; the identical-output changes found so far cut it by 5 to 14% per image (measured and inferred).
 
 ## Measure
@@ -31,7 +33,8 @@ This fork of the [zeldaret/mm](https://github.com/zeldaret/mm) decompilation cha
 ```bash
 tools/fps60/worktree-setup.sh <unit> <branch>     # prepare a worktree for building
 make -j32 BENCH=1                                  # build/n64-us-bench/mm-n64-us.z64
-tools/fps60/run.py build/n64-us-bench/mm-n64-us.z64 --out RESULTS
+tools/fps60/run.py build/n64-us-bench/mm-n64-us.z64 --out RESULTS                  # fidelity: noise pin on
+tools/fps60/run.py build/n64-us-bench/mm-n64-us.z64 --out RESULTS --noise-pin off  # load: retail rendering
 tools/fps60/fidelity.py BASE_RESULTS RESULTS       # F1: keyframes against the reference
 ```
 
