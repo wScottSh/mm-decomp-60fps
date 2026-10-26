@@ -185,6 +185,22 @@ typedef struct BenchNoiseTotals {
 } BenchNoiseTotals;
 
 /**
+ * What tick N's gfx task drew, written as the task is set up (Bench_TagCfb). BENCH_STATE_CAPTURE and
+ * BENCH_STATE_PAUSE_FILTER are the retail holds (preferences line 24); the rest show which feature a
+ * corpus scene exercises.
+ */
+#define BENCH_STATE_CAPTURE (1 << 0)      // the task does not swap: a pause-background, picto or tile capture (graph.c, SREG(33))
+#define BENCH_STATE_PAUSE_FILTER (1 << 1) // the pause background is being filtered (R_PAUSE_BG_PRERENDER_STATE or its filterState is PROCESS)
+#define BENCH_STATE_PAUSE (1 << 2)        // the pause menu is open (pauseCtx.state != PAUSE_STATE_OFF)
+#define BENCH_STATE_PAGE_TURN (1 << 3)    // the pause menu is turning pages (PAUSE_MAIN_STATE_SWITCHING_PAGE)
+#define BENCH_STATE_MOTION_BLUR (1 << 4)  // R_MOTION_BLUR_ENABLED or R_MOTION_BLUR_PRIORITY_ENABLED
+#define BENCH_STATE_TRANSITION (1 << 5)   // a scene transition runs (transitionTrigger or transitionMode is not OFF)
+#define BENCH_STATE_TILE (1 << 6)         // gTransitionTileState is not TRANS_TILE_OFF
+#define BENCH_STATE_PLAY (1 << 7)         // the game state is Play
+#define BENCH_STATE_WORD(tick, divisor, flags) (((tick) << 12) | (((divisor) & 0xF) << 8) | ((flags) & 0xFF))
+#define BENCH_STATE_RING 1024
+
+/**
  * What the fps60 harness reads between VI fields (tools/fps60/README.md). The layout is the harness
  * contract: run.py reads these words by offset from the map address of gBenchProbe.
  */
@@ -207,6 +223,7 @@ typedef struct BenchProbe {
     /* 0x44 */ u32 clockReadCost; // PClocks per Bench_CpuNow call, timed at boot
     /* 0x48 */ BenchNoiseRecord cfbNoise[3]; // that tick's noise-pin walk, zero with the pin off
     /* 0x78 */ BenchNoiseTotals noise;
+    /* 0x98 */ u32* tickState;  // a ring of BENCH_STATE_RING words, tick N at N % BENCH_STATE_RING (BENCH_STATE_WORD)
 } BenchProbe;
 
 extern BenchProbe gBenchProbe;
