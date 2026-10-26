@@ -23,6 +23,15 @@ please be aware that the codebase could drastically change at any time. Also not
 parts of the ROM may not be 'shiftable' yet, so modifying them could currently be difficult.
 ```
 
+## 60 fps project
+
+This fork works toward one goal: Majora's Mask on an NTSC N64 with the Expansion Pak presents a new image on every VI field, a steady 60 fps that never swings, with nothing else changed. Resolution, textures, effects, audio, game logic and real-world game speed stay as retail. The work is engine optimization only, measured on a pinned build of the [ares timing fork](https://github.com/wScottSh/ares).
+
+- **Rules.** Game logic keeps its retail tick (Play ticks every 3 fields) and stays bit-identical per tick. The extra images come from interpolating between ticks. Fidelity is pixel-exact against retail: no tolerance band. The shipping ROM uses no emulator-only feature and fits the retail save type and size.
+- **Approach.** A frozen harness measures each change, and each optimization is one hypothesis with before and after numbers on the same corpus of scenes.
+- **Status.** The harness (`tools/fps60/`) runs a corpus of 6 scenes deterministically. It measures presentation and tick cadence, keys every image to its logic tick for the fidelity check, and measures load: CPU busy per field and per tick (per thread, per `Graph_Update` phase, per engine system and per actor), RSP busy split into gfx and audio, and RDP busy. The retail reference presents one image per 3 fields in every Play scene, and its per-tick CPU, RSP and RDP work is 1.3 to 2.4 fields' worth in Play (`docs/fps60/baseline.md`). The budget analysis and the interpolation design come next.
+- **Measure.** `tools/fps60/README.md`: build with `make BENCH=1`, run `tools/fps60/run.py`, read `tools/fps60/report.py`.
+
 This is a WIP **decompilation** of ***The Legend of Zelda: Majora's Mask***. The purpose of the project is to recreate a source code base for the game from scratch, using information found inside the game along with static and/or dynamic analysis. **It is not, and will not, produce a PC port.** For frequently asked questions, you can visit [our website](https://zelda.deco.mp/games/mm), and for more information you can get in touch with the team on our [Discord server](https://discord.zelda.deco.mp).
 
 The only version currently supported is N64 US, but we intend to eventually support every retail version of the original game (i.e. not versions of MM3D, which is a totally different game).

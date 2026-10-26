@@ -1,6 +1,6 @@
 # fps60 harness
 
-The fps60 harness measures how a `BENCH=1` build of this tree presents images and runs its logic ticks. It runs each scene of a fixed corpus on the pinned ares runner and writes per-field data, the image each logic tick ends on, and summaries. `fidelity.py` compares two runs tick by tick (check F1). The program's rules are in `~/.claude/orchestrate/mm-60fps/preferences.md`. After unit H1 lands, `tools/fps60/` is frozen (preferences line 7).
+The fps60 harness measures how a `BENCH=1` build of this tree presents images, runs its logic ticks, and loads the CPU, RSP and RDP. It runs each scene of a fixed corpus on the pinned ares runner and writes per-field data, the image each logic tick ends on, load per field and per tick, and summaries. `fidelity.py` compares two runs tick by tick (check F1). The program's rules are in `~/.claude/orchestrate/mm-60fps/preferences.md`. After unit H1 lands, `tools/fps60/` is frozen (preferences line 7).
 
 ## Run
 
@@ -63,6 +63,11 @@ A retail-architecture build presents one image per logic tick, so every image is
 | `<scene>/script.txt`, `events.txt` | The generated runner script, and its mark and peek lines. |
 | `<scene>/guest.txt` | The ROM's IS-Viewer output (the `BENCH START` line). |
 | `<scene>/host.txt` | The runner's stop line and host-time lines. Not deterministic. |
+| `load.tsv` | One row per scene: `field_ms` (the median runner field), and for each load resource the max, p99 and p50 per field (`f_`) and per tick (`t_`) as a share of one field, and `hook_ms_p50`. |
+| `<scene>/load_summary.json` | Per resource, per field and per tick: `max`, `p99`, `p50` in ms and as a share of one field. Per tick also: CPU time per thread (`tick_cpu`), per graph phase in wall and CPU time (`tick_phase_wall`, `tick_phase_cpu`), per system (`tick_system`), thread switches, the top 10 actors by update plus draw time, and the hook cost. |
+| `<scene>/load_fields.tsv` | One row per retrace interval in the window (see Load metrics). |
+| `<scene>/load_ticks.tsv` | One row per logic tick that starts and ends inside the window: the `BenchTick` record (`include/bench.h`) plus `cpu_busy`, `rsp_gfx` and `other_threads`. |
+| `<scene>/load_actors.tsv` | Graph thread time per actor id over the window, in update and draw, sorted by the sum. |
 
 `fields.tsv` columns:
 
@@ -80,7 +85,55 @@ A retail-architecture build presents one image per logic tick, so every image is
 
 - **Fields per displayed image.** A complete image is a run of fields between two `VI_ORIGIN` changes inside the window. The partial images at the window edges are left out. The pass rule is that every image lasts 1 field (`image_share_at_1` = 1).
 - **Fields per logic tick.** A tick's length is the number of fields from the first field showing any of its images to the first field showing the next tick's image. This is VI-locked, unlike the start time of `Graph_Update`, which moves with CPU and RDP time inside a field. The first and last tick in the window are left out. A **lag tick** lasts longer than the divisor at its first field. A **skipped tick** never appears. Its time counts toward the tick before it.
+- **Load.** See Load metrics below.
 - **F1.** `fidelity.py` takes each scene's keyframes by `image_tick`, over the tick range both windows cover. A tick passes when both sides have a keyframe for it and the two `fb_hash` values are equal. The output is pass or fail, the first differing tick, and the number of differing ticks.
+
+## Load metrics
+
+The load counters are always on in a `BENCH` build and cost nothing to read: the runner peeks RAM between fields without touching emulated timing. Perf runs use them. Units in the TSVs: CPU times are PClocks (93.75 MHz), RSP times are the runner's 750 MHz units (`XPROFREAD 0x0200`), RDP counters are RCP clocks (62.5 MHz). The summaries convert to ms. A share is ms divided by the median runner field (`stats.tsv` `cpu_cycles` per field, 16.715 ms measured).
+
+### CPU time per thread
+
+`Bench_EnqueueAndYield` (`src/boot/idle.c`) replaces `__osEnqueueAndYield` at its 7 libultra call sites under `#if BENCH` (`osRecvMesg`, `osSendMesg`, `osJamMesg`, `osStartThread`, `osSetThreadPri`, `osStopThread`, `osYieldThread`). Every thread switch in MM goes through one of them, or through an interrupt whose woken thread resumes inside one of them. At each switch, `Bench_CpuSwitch` charges `2 * (COUNT - last)` PClocks to the thread that has been running and records which thread runs next: the run queue's head, or the yielding thread when it goes back on the run queue ahead of that head. When an interrupt preempts a thread, nothing runs the hook until the woken thread resumes in its own yield, and that charge goes to the preempted thread. So each PClock is charged once, to the thread that ran it.
+
+- **CPU busy** = wall time minus the idle thread's time. The idle thread (`Idle_ThreadEntry` after it sets `OS_PRIORITY_IDLE`) runs only when no other thread can, including while the graph thread waits on the RCP in `Graph_TaskSet00`.
+- The exception handler's time goes to the thread that was running when the exception was taken, and the dispatch after a switch goes to the thread that runs next. So a thread's time includes the kernel time of the interrupts that hit it. emux has an exception-level cycle counter (`XPROFREAD 0x0001`), but the fork credits pending cycles to it in batches at count flushes (`ares/n64/cpu/cpu.cpp` `stepCount`), so it is not used.
+- `switches` counts hook calls (two per switch).
+- Graph thread brackets use `Bench_CpuNow`, the running thread's charged time plus the time since its last switch, read with interrupts disabled. A system bracket therefore excludes the time of every thread that preempted the graph thread inside it.
+
+### Per field
+
+`Bench_FieldSnapshot` runs in the scheduler thread at every VI retrace (`Sched_HandleRetrace`) and writes the cumulative counters into a ring of 4 `BenchField` records. It also folds the 24-bit DPC counters into 32-bit totals and clears them, so they never wrap. The runner peeks the whole ring after every field. A runner field can end just before or just after the scheduler takes the snapshot of the retrace at its end, so the harness keys fields by retrace, not by runner field: `load_fields.tsv` has one row per interval between consecutive retrace snapshots, from the latest snapshot at the window's start to the latest at its end (600 intervals in the reference corpus, measured). The interval's own wall time (`wall`) varies with the scheduler's latency by about ±0.7% around the runner field (measured, `snapshot_wall_pclk_min` and `_max` in `load_summary.json`), so a per-field share can exceed 1.0 by that much.
+
+A peek can see part of a record from before the store that completed it and part from after (measured: one 16-byte cache line stale while the next line and `seq` were new). Records are written with `seq` set to `0xFFFFFFFF` first and to its number last, and the harness uses a record only when two consecutive reads agree. A record stays in the ring for 4 retraces, so each is read 3 or 4 times. `run.py` runs two fields past the window to read the last ones.
+
+| Column | Meaning |
+|---|---|
+| `seq` | The retrace that ends the interval. |
+| `wall` | PClocks between the two snapshots. |
+| `cpu_busy`, `idle` | Wall minus the idle thread's time, and the idle thread's time. |
+| `graph`, `audio` | The graph thread's and the AudioMgr thread's time (`AudioThread_Update` runs there). |
+| `switches` | Thread switch hooks. |
+| `rsp`, `rsp_gfx`, `rsp_audio` | Non-halted RSP time: all of it (emux global `XPROFREAD 0x0200`), the part outside audio tasks, and the part inside them. |
+| `rdp_pipe`, `rdp_buf` | `DPC_PIPEBUSY` and `DPC_BUFBUSY` RCP clocks. |
+
+**RSP split.** `Sched_RunTask` opens emux profile slot 1 just before `osSpTaskStartGo` of an audio task, and `Sched_HandleRSPDone` closes it and adds its non-halted RSP time. The RSP runs one task at a time, and the scheduler yields the gfx task before it starts an audio task, so the slot holds only audio time. A snapshot or tick boundary that falls inside an audio task splits the slot there. Gfx is total minus audio. These come from emux, so on hardware both read 0.
+
+**RDP.** `rdp_pipe` is RDP pipe busy (`DPC_PIPEBUSY`). In the fork, `PIPE_BUSY` holds from a `DPC_END` write until `SYNC_FULL` retires (`ares/n64/rdp/timed.hpp`, `Dpc::busy` and `syncFullRetired`), so it includes time the RDP waits for the RSP to send more commands. `rdp_buf` (`BUFBUSY`: the command FIFO is not empty or a command executes) leaves out most of that wait. Which of the two the budget uses is for B1 to decide.
+
+### Per tick
+
+A tick runs from its `Graph_Update` start (`Bench_BeginFrame`) to the next one. `Bench_BeginFrame` writes the ending tick's `BenchTick` into a ring of 640 records, and `run.py` reads the ring once after the window. `load_ticks.tsv` has the ticks that start and end inside the window.
+
+- `wall`, `idle`, `graph`, `audio`, `sched`, `irqmgr`, `padmgr`, `dmamgr`: as per field. `other_threads` is the rest (PI manager, main, flash).
+- `rsp`, `rsp_audio`, `rdp_pipe`, `rdp_buf`: as per field, with the DPC counters read live at the boundary.
+- `wall_<phase>`, `cpu_<phase>`: the graph thread's wall and CPU time per phase of `Graph_Update`. `pre` is input and `Audio_Update`, `update` is `Play_Update`, `draw` is `Play_Draw`, `game` is the rest of `GameState_Update` (all of it outside Play), `post` is the display list close and task setup, `rcp_wait` is `Graph_TaskSet00` blocked on the previous gfx task, and `tail` is the rest until the next tick.
+- `sys_<system>`: graph thread CPU time per engine system. Time is exclusive: the innermost entered system gets it, and `other` gets the rest, so the systems sum to the tick's `graph`. The brackets sit at the call sites in `z_play.c`, `z_actor.c` and `graph.c`: `actor_update` (`Actor_UpdateAll`), `actor_draw` (`Actor_DrawAll` without its effect draws), `collision` (`CollisionCheck_AT`, `_OC`, `_Damage`, `_ClearContext`), `room_draw` (`Scene_Draw`, `Room_Draw`), `skybox`, `environment` (`Environment_Update` and the `Environment_Draw*` calls), `camera` (`Camera_Update`), `message` (`Message_*` and `Interface_*` update and draw), `effect` (`Effect_*`, `EffectSs_*`, `EffFootmark_*`), `audio_update` (`Audio_Update`), and `bench` (the tick bookkeeping). Audio synthesis is the AudioMgr thread, not a graph system.
+- Actor time: `Actor_UpdateActor` brackets each `actor->update` call and `Actor_Draw` brackets itself, keyed by actor id.
+
+### Hook cost
+
+Every bracket calls `Bench_CpuNow` twice. The ROM times 64 calls at boot (`clock_read_pclk` in the `BENCH START` line and `hook_clock_read_pclk` in `load_summary.json`), and each tick counts its calls (`clock_reads`). `hook_ms_per_tick` is their product. It leaves out the switch hooks (`switches` calls of `Bench_CpuSwitch`). The hooks are the same code in every `BENCH` build and run once per call site, so two builds that play the same game pay the same count. A candidate must keep every bracket where it is: moving one moves time between systems. The H1b report has the measured cost.
 
 ## Pins
 
@@ -108,12 +161,12 @@ Paths that feed timing into game logic and are not pinned. Each one is outside t
 | `src/code/sched.c:245, 427`, `src/code/graph.c:159` | Frame pacing itself: swaps, retraces, and the 3 s RCP hang timeout. | This is what the harness measures, not a confound. |
 | `src/code/z_nmi_buff.c:32`, `src/boot/libc64/__osMalloc.c:37`, `src/boot/fault.c:553` | Reset time, allocation debug stamps, the crash screen. | Not read by game logic. |
 
-`BENCH` also changes the boot (`Bench_BootPlay` and `Bench_BootFileSelect` in `bench.c` take shortcuts that the console logo, title and file select would otherwise take) and adds RAM (the probe, the 4 KiB input table, `tools/bench`'s record buffer). Base and candidate share these.
+`BENCH` also changes the boot (`Bench_BootPlay` and `Bench_BootFileSelect` in `bench.c` take shortcuts that the console logo, title and file select would otherwise take), adds RAM (the probe, the 4 KiB input table, the load rings: 111 KiB of bss, against 73 KiB for the per-frame record buffer they replace), and adds the load hooks' CPU time (see Load metrics). Base and candidate share these. `tools/fps60/memmap.py ELF...` prints the static RAM layout of builds side by side.
 
 ## Gotchas
 
 - The harness reads `gBenchProbe` by offset (`run.py`, `PROBE_*`). A change to `BenchProbe` or `BenchConfig` in `include/bench.h` is a harness change. `run.py` checks the probe's magic and the config's magic, not the layout.
-- `run.py` never clears `BENCH_FLAG_PIN_EFFECT_BUDGET`. `tools/bench/bench.py` leaves the defaults, so it also runs pinned and also records (`BENCH_FLAG_RECORD`). `run.py` turns recording off, so the ROM never exits on its own.
+- `run.py` never clears `BENCH_FLAG_PIN_EFFECT_BUDGET`. The ROM never exits on its own: the runner script stops it.
 - `title` settles 127 ticks after boot. The Play scenes with an entrance cutscene (`field`, `greatbay`) settle about 200 ticks after boot. Their runs take longer for that reason.
 - The first image of a window often belongs to a tick before `settleTick`, because the image the VI shows lags the latest tick by about two ticks.
 - F1 is sensitive to RDP timing through the noise generator (see the table above). A planted change that draws one pixel on tick 100 of `sct` fails F1 in `sct` only when it is compared with a build of the same layout. Its first differing tick is 99, because the extra CPU work during tick 100 moves the RDP's render of tick 99 and so its noise. Compared with the reference, the same build fails in 5 scenes, each within its first 12 compared ticks. The H1a report has the patches and numbers.
