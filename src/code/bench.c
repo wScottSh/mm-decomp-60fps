@@ -92,7 +92,7 @@ typedef enum BenchPhase {
 // retraceTicks is the gIrqMgrRetraceTime that IrqMgr measures on the fps60 runner (BENCH START line)
 BenchConfig gBenchConfig = {
     BENCH_CONFIG_MAGIC, 0, 120, BENCH_MAX_FRAMES, 0x12345678, BENCH_FLAG_RECORD | BENCH_FLAG_PIN_EFFECT_BUDGET,
-    782715, 0, { { 0 } }, false,
+    782715, 0, { { 0 } }, BENCH_NOISE_PIN_OFF,
 };
 
 BenchProbe gBenchProbe;
@@ -796,19 +796,33 @@ static void Bench_NoiseWalk(BenchNoiseWalk* walk, u32 pc) {
  * tick whose image `cfb` will hold. Runs after the previous gfx task finished, so the RCP reads none of
  * the lists it rewrites, and before Sched writes the data cache back for the task.
  */
+static void Bench_NoiseWalkTask(BenchNoiseWalk* walk, Gfx* taskList) {
+    bzero(walk, sizeof(*walk));
+    walk->ucode = BENCH_UCODE_F3DZEX2;
+    walk->record.hash = BENCH_FNV_OFFSET;
+    Bench_NoiseWalk(walk, OS_K0_TO_PHYSICAL(taskList));
+}
+
 void Bench_PinNoise(CfbInfo* cfb, Gfx* taskList) {
     BenchNoiseWalk* walk = &sBenchNoiseWalk;
+    BenchNoiseRecord first;
 
-    if (!gBenchConfig.noisePin) {
+    if (gBenchConfig.noisePin == BENCH_NOISE_PIN_OFF) {
         return;
     }
 
-    bzero(walk, sizeof(*walk));
     bzero(sBenchNoisePoolEntries, sizeof(sBenchNoisePoolEntries));
-    walk->ucode = BENCH_UCODE_F3DZEX2;
-    walk->record.hash = BENCH_FNV_OFFSET;
+    Bench_NoiseWalkTask(walk, taskList);
 
-    Bench_NoiseWalk(walk, OS_K0_TO_PHYSICAL(taskList));
+    if (gBenchConfig.noisePin == BENCH_NOISE_PIN_CHECK) {
+        first = walk->record;
+        Bench_NoiseWalkTask(walk, taskList);
+        if ((walk->record.hash != first.hash) || (walk->record.commands != first.commands) ||
+            (walk->record.visited != first.visited) || (walk->record.patched != 0)) {
+            gBenchProbe.noise.mismatch++;
+        }
+        walk->record = first;
+    }
 
     gBenchProbe.cfbNoise[cfb - sGraphCfbInfos] = walk->record;
     gBenchProbe.noise.walks++;

@@ -52,7 +52,7 @@ def dump(result, scene_name, frame, out):
     rom, symbols = run.load_rom(meta["rom"], meta["map"])
     scene = next(s for s in corpus.SCENES if s["name"] == scene_name)
     ppm = out / f"{scene_name}.ppm"
-    run.run_scene(rom, symbols, Path(meta["runner"]), scene, out, meta.get("noise_pin", False),
+    run.run_scene(rom, symbols, Path(meta["runner"]), scene, out, "on" if meta.get("noise_pin") else None,
                   dump_frames=[(frame, ppm)])
     return ppm
 

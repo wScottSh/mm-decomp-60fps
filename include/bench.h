@@ -25,6 +25,11 @@ struct GraphicsContext;
 
 #define BENCH_MAX_INPUTS 512
 
+// BenchConfig.noisePin
+#define BENCH_NOISE_PIN_OFF 0   // retail RDP noise (perf runs)
+#define BENCH_NOISE_PIN_ON 1    // Bench_PinNoise neutralizes RDP noise in every gfx task (fidelity runs)
+#define BENCH_NOISE_PIN_CHECK 2 // as ON, and every task is walked a second time to check the walk is idempotent
+
 // BenchConfig.flags
 #define BENCH_FLAG_RECORD (1 << 0)            // keep per-frame records, dump them and exit (tools/bench)
 #define BENCH_FLAG_PIN_EFFECT_BUDGET (1 << 1) // func_80173B48 returns its no-lag value
@@ -55,7 +60,7 @@ typedef struct BenchConfig {
     u32 retraceTicks; // the gIrqMgrRetraceTime that the pinned effect budget uses
     u32 inputCount;   // clamped to BENCH_MAX_INPUTS
     BenchInput inputs[BENCH_MAX_INPUTS];
-    u32 noisePin;     // nonzero: Bench_PinNoise neutralizes RDP noise in every gfx task (fidelity runs)
+    u32 noisePin;     // BENCH_NOISE_PIN_*
 } BenchConfig;
 
 extern BenchConfig gBenchConfig;
@@ -81,6 +86,7 @@ typedef struct BenchNoiseTotals {
     u32 unresolved; // G_DL, G_BRANCH_Z targets outside RDRAM or in a segment that was never set
     u32 unknown;    // opcodes the walker cannot follow, and noise fields a partial othermode write leaves undecided
     u32 overflow;   // walks cut short by the call stack or the visit cap, and patches the log had no room for
+    u32 mismatch;   // BENCH_NOISE_PIN_CHECK: second walks whose record differs from the first's or that patched
 } BenchNoiseTotals;
 
 /**

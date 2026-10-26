@@ -46,8 +46,9 @@ CFG_NOISE_PIN = CFG_INPUTS + 8 * MAX_INPUTS
 PROBE_CFB_NOISE, NOISE_RECORD_SIZE = 0x2C, 16
 NOISE_RECORD = ["noise_hash", "noise_cmds", "noise_patched", "dl_cmds"]
 PROBE_NOISE_TOTALS = 0x5C
-NOISE_TOTALS = ["walks", "visited", "commands", "patched", "unresolved", "unknown", "overflow"]
-NOISE_MUST_BE_ZERO = ["unresolved", "unknown", "overflow"]
+NOISE_TOTALS = ["walks", "visited", "commands", "patched", "unresolved", "unknown", "overflow", "mismatch"]
+NOISE_MUST_BE_ZERO = ["unresolved", "unknown", "overflow", "mismatch"]
+NOISE_PIN = {"off": 0, "on": 1, "check": 2}  # BENCH_NOISE_PIN_*
 
 # Optional: u32 gBenchCfbKeyframe[CFB_COUNT], nonzero when that CfbInfo's image is its tick's final
 # image. A build without it presents one image per tick, so every image is a keyframe.
@@ -88,7 +89,7 @@ def patch_rom(rom, scene, noise_pin):
     struct.pack_into(">5I", data, at + CFG_SCENE, corpus.BOOT[scene["boot"]], 0, 0, SEED, FLAG_PIN_EFFECT_BUDGET)
     struct.pack_into(">I", data, at + CFG_INPUT_COUNT, len(inputs))
     if noise_pin:
-        struct.pack_into(">I", data, at + CFG_NOISE_PIN, 1)
+        struct.pack_into(">I", data, at + CFG_NOISE_PIN, NOISE_PIN[noise_pin])
     for n, (tick, buttons, x, y) in enumerate(inputs):
         struct.pack_into(">HHbbH", data, at + CFG_INPUTS + 8 * n, tick, buttons, x, y, 0)
     retrace = struct.unpack_from(">I", data, at + CFG_RETRACE)[0]
@@ -295,7 +296,7 @@ def run_scene(rom, symbols, runner, scene, out, noise_pin, dump_frames=()):
         write_tsv(scene_dir / "ticks.tsv", tks)
     summary = {"scene": name, "boot": scene["boot"], "window_start_frame": marks["window"],
                "settle_tick": settle_tick, "retrace_ticks": retrace, **summarize(rows, imgs, tks),
-               "noise_pin": noise_pin}
+               "noise_pin": bool(noise_pin)}
     noise = ""
     if noise_pin:
         totals = noise_totals(name, peeks)
@@ -304,7 +305,8 @@ def run_scene(rom, symbols, runner, scene, out, noise_pin, dump_frames=()):
             k["noise_patched"] for k in keyframes)}
         noise = (f"; noise pin: {totals['walks']} walks since boot, {totals['visited']} commands visited, "
                  f"{totals['commands']} noise commands, {totals['patched']} patched, unresolved "
-                 f"{totals['unresolved']}, unknown {totals['unknown']}, overflow {totals['overflow']}")
+                 f"{totals['unresolved']}, unknown {totals['unknown']}, overflow {totals['overflow']}, mismatch "
+                 f"{totals['mismatch']}")
     (scene_dir / "summary.json").write_text(json.dumps(summary, indent=1) + "\n")
     print(f"{name}: measured {summary['fields']} fields, {summary['images']} images, {summary['ticks']} ticks "
           f"({wall[0]:.1f} s){noise}", flush=True)
@@ -358,8 +360,9 @@ def main():
     p.add_argument("--scenes", default=",".join(s["name"] for s in corpus.SCENES))
     p.add_argument("--jobs", type=int, default=MAX_JOBS)
     p.add_argument("--runner", type=Path, default=Path(os.environ.get("N64_RUN", RUNNER)))
-    p.add_argument("--no-noise-pin", dest="noise_pin", action="store_false",
-                   help="retail RDP noise, for perf runs; fidelity runs keep the pin (README, Noise pin)")
+    p.add_argument("--noise-pin", choices=list(NOISE_PIN), default="on",
+                   help="off: retail RDP noise, for perf runs. on (default): fidelity runs. check: as on, and "
+                   "each task is walked twice to check the walk is idempotent (README, Noise pin)")
     p.add_argument("--check-determinism", action="store_true",
                    help="run twice into OUT/run1 and OUT/run2; fail unless every output but wall time matches")
     args = p.parse_args()
@@ -374,9 +377,10 @@ def main():
 
     runner_digest = check_runner(args.runner)
     rom, symbols = load_rom(args.rom, map_path)
+    args.noise_pin = None if args.noise_pin == "off" else args.noise_pin
     if args.noise_pin and NOISE_PIN_SYMBOL not in symbols:
         raise SystemExit(f"{map_path}: no {NOISE_PIN_SYMBOL}; this ROM predates the noise pin, run it with "
-                         "--no-noise-pin")
+                         "--noise-pin off")
     if not args.check_determinism:
         measure(args, map_path, names, by_name, runner_digest, rom, symbols, args.out)
         return
@@ -403,7 +407,7 @@ def measure(args, map_path, names, by_name, runner_digest, rom, symbols, out):
     meta = {"rom": str(args.rom.resolve()), "rom_sha256": sha256(args.rom), "map": str(map_path.resolve()),
             "map_sha256": sha256(map_path), "runner": str(args.runner), "runner_sha256": runner_digest,
             "gBenchProbe": f"0x{symbols['gBenchProbe']:08X}", "keyframe_symbol": KEYFRAME_SYMBOL in symbols,
-            "noise_pin": args.noise_pin, "scenes": names}
+            "noise_pin": bool(args.noise_pin), "noise_pin_mode": args.noise_pin or "off", "scenes": names}
     (out / "meta.json").write_text(json.dumps(meta, indent=1) + "\n")
 
     load_before = os.getloadavg()[0]
