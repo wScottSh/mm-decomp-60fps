@@ -54,10 +54,18 @@ NOISE_PIN = {"off": 0, "on": 1, "check": 2, "noise-only": 3}  # BENCH_NOISE_PIN_
 
 # The load pin (Bench_DmaRecv, Bench_AudioBarrier): BenchProbe.load (BenchLoadTotals), read after the window.
 LOAD_PIN_SYMBOL = "Bench_DmaRecv"
-PROBE_LOAD_TOTALS = 0x98
+PROBE_LOAD_TOTALS = 0x9C
 LOAD_TOTALS = ["dma_polls", "dma_held", "dma_waited", "dma_untracked", "dma_overflow", "audio_barriers",
                "audio_waits"]
 LOAD_MUST_BE_ZERO = ["dma_untracked", "dma_overflow"]
+
+# BenchProbe.tickState: a ring of BENCH_STATE_RING words, (tick << 12) | (divisor << 8) | BENCH_STATE_* flags,
+# written when each tick's gfx task is set up and read once after the window.
+PROBE_TICK_STATE, STATE_RING = 0x98, 1024
+STATE_FLAGS = ["capture", "pause_filter", "pause", "page_turn", "motion_blur", "transition", "tile", "play"]
+# Retail holds (preferences line 24): a capture tick never swaps, so the image before it stays up for that
+# tick's fields; a tick whose render runs while the pause background filters shows only its keyframe.
+HOLD_CAPTURE, HOLD_PAUSE_FILTER = 1 << 0, 1 << 1
 
 # Optional: u32 gBenchCfbKeyframe[CFB_COUNT], nonzero when that CfbInfo's image is its tick's final
 # image. A build without it presents one image per tick, so every image is a keyframe.
@@ -134,6 +142,7 @@ def script(symbols, window, noise_pin):
         per_field += [f"peek n{i}_{k} {a(PROBE_CFB_NOISE + NOISE_RECORD_SIZE * i + 4 * j)} w"
                       for i in range(CFB_COUNT) for j, k in enumerate(NOISE_RECORD)]
         end += [f"peek total_{k} {a(PROBE_NOISE_TOTALS + 4 * j)} w" for j, k in enumerate(NOISE_TOTALS)]
+    end += [f"peek s{n} [{a(PROBE_TICK_STATE)}]+0x{4 * n:X} w" for n in range(STATE_RING)]
     return steps + per_field * window + load.end_steps(probe) + end + ["stop"]
 
 
@@ -193,7 +202,7 @@ def per_field(name, stats, marks, peeks, window, has_keyframe, noise_pin):
     cfbs, cfb_size = static.get("cfbs"), static.get("cfb_size")
     if cfbs is None or not cfb_size:
         raise SystemExit(f"{name}: missing the window-start peeks")
-    rows, fb_offset = [], None
+    rows, fb_offset, retaken = [], None, 0
     for i in range(window):
         frame = start + i
         p = peeks.get(frame + 1)
@@ -207,15 +216,21 @@ def per_field(name, stats, marks, peeks, window, has_keyframe, noise_pin):
             raise SystemExit(f"{name}: field {i}: gScheduler.curBuf 0x{p['cur']:08X} is not an sGraphCfbInfos entry")
         origin = int(stats[frame]["origin"], 16)
         offset = origin - (p["fb"] & 0x00FFFFFF)
+        row = {"field": i, "frame": frame, "origin": stats[frame]["origin"], "fb_hash": stats[frame]["fb_hash"],
+               "tick": p["tick"]}
         if fb_offset is None:
             fb_offset = offset
         elif offset != fb_offset:
-            raise SystemExit(f"{name}: field {i}: VI origin 0x{origin:06X} is not the shown CfbInfo's framebuffer "
-                             f"0x{p['fb']:08X} + 0x{fb_offset:X}")
-        rows.append({
-            "field": i, "frame": frame, "origin": stats[frame]["origin"], "fb_hash": stats[frame]["fb_hash"],
-            "tick": p["tick"], "image_tick": p[f"c{index}"],
-            "keyframe": int(p[f"k{index}"] != 0) if has_keyframe else 1,
+            # A capture tick takes a CfbInfo without swapping, so the next tick can take the CfbInfo the VI
+            # still shows (graph.c sCfbIndex). Until the swap, the image is the previous field's.
+            if not rows or stats[frame]["origin"] != rows[-1]["origin"]:
+                raise SystemExit(f"{name}: field {i}: VI origin 0x{origin:06X} is not the shown CfbInfo's "
+                                 f"framebuffer 0x{p['fb']:08X} + 0x{fb_offset:X}")
+            rows.append(rows[-1] | row | {"divisor": p["div"]})
+            retaken += 1
+            continue
+        rows.append(row | {
+            "image_tick": p[f"c{index}"], "keyframe": int(p[f"k{index}"] != 0) if has_keyframe else 1,
             "image": p[f"i{index}"] if has_keyframe else None, "divisor": p["div"],
         } | ({f: (f"{p[f'n{index}_{f}']:08X}" if f == "noise_hash" else p[f"n{index}_{f}"]) for f in NOISE_RECORD}
              if noise_pin else {}))
@@ -229,7 +244,7 @@ def per_field(name, stats, marks, peeks, window, has_keyframe, noise_pin):
         bad = next((r for r in rows if not 1 <= r["image"] <= 3), None)
         if bad:
             raise SystemExit(f"{name}: field {bad['field']}: {IMAGE_SYMBOL} {bad['image']} is not an image index")
-    return rows, static["settle_tick"]
+    return rows, static["settle_tick"], retaken
 
 
 def images(rows):
@@ -262,6 +277,39 @@ def ticks(rows):
         out.append({"tick": t, "first_field": a, "fields": b - a, "divisor": first[t]["divisor"],
                     "skipped_after": nxt - t - 1})
     return out
+
+
+def tick_states(name, peeks, rows):
+    """BenchProbe.tickState for every tick from the window's first image to its last."""
+    last = peeks[max(peeks)]
+    first_tick, last_tick = min(r["image_tick"] for r in rows), max(r["image_tick"] for r in rows)
+    if last_tick - first_tick >= STATE_RING:
+        raise SystemExit(f"{name}: {last_tick - first_tick + 1} ticks in the window, the state ring holds {STATE_RING}")
+    out = []
+    for t in range(first_tick, last_tick + 1):
+        word = last.get(f"s{t % STATE_RING}")
+        if word is None or word >> 12 != t & 0xFFFFF:
+            raise SystemExit(f"{name}: no tick state for tick {t} (ring word {word if word is None else hex(word)})")
+        flags = word & 0xFF
+        out.append({"tick": t, "divisor": (word >> 8) & 0xF, "flags": f"0x{flags:02X}",
+                    **{k: int(bool(flags & (1 << i))) for i, k in enumerate(STATE_FLAGS)}})
+    return out
+
+
+def holds(rows, imgs, states):
+    """Window fields that repeat the previous image because retail holds it (HOLD_*): the fields of the
+    capture ticks after an image's tick, and every field after the first of a pause-filter tick's image."""
+    by_tick = {s["tick"]: (s["divisor"], int(s["flags"], 16)) for s in states}
+    total = 0
+    for img in imgs:
+        tick, repeats = img["image_tick"], img["fields"] - 1
+        next_tick = rows[img["first_field"] + img["fields"]]["image_tick"]
+        if by_tick[tick][1] & HOLD_PAUSE_FILTER:
+            total += repeats
+            continue
+        captured = sum(by_tick[t][0] for t in range(tick + 1, next_tick) if by_tick[t][1] & HOLD_CAPTURE)
+        total += min(repeats, captured)
+    return total
 
 
 def distribution(values):
@@ -310,7 +358,8 @@ def run_scene(rom, symbols, runner, scene, out, noise_pin, load_pin, dump_frames
         raise SystemExit(f"{name}: the ROM booted {m.group(2) if m else 'nothing'}, not {scene['boot']}")
     marks, peeks = parse_events(events)
     stats_rows = read_stats(scene_dir / "stats.tsv")
-    rows, settle_tick = per_field(name, stats_rows, marks, peeks, window, KEYFRAME_SYMBOL in symbols, noise_pin)
+    rows, settle_tick, retaken = per_field(name, stats_rows, marks, peeks, window, KEYFRAME_SYMBOL in symbols,
+                                           noise_pin)
     imgs, tks = images(rows), ticks(rows)
     write_tsv(scene_dir / "fields.tsv", rows)
     keyframes = [i for i in imgs if i["keyframe"]]
@@ -328,9 +377,13 @@ def run_scene(rom, symbols, runner, scene, out, noise_pin, load_pin, dump_frames
         (scene_dir / "images.tsv").write_text("\t".join(image_keys) + "\n")
     if tks:
         write_tsv(scene_dir / "ticks.tsv", tks)
+    states = tick_states(name, peeks, rows)
+    write_tsv(scene_dir / "states.tsv", states)
     summary = {"scene": name, "boot": scene["boot"], "window_start_frame": marks["window"],
                "settle_tick": settle_tick, "retrace_ticks": retrace, **summarize(rows, imgs, tks),
-               "noise_pin": bool(noise_pin), "noise_pin_mode": noise_pin or "off", "load_pin": load_pin}
+               "hold_fields": holds(rows, imgs, states), "retaken_cfb_fields": retaken,
+               "state_ticks": {k: sum(s[k] for s in states) for k in STATE_FLAGS}, "noise_pin": bool(noise_pin),
+               "noise_pin_mode": noise_pin or "off", "load_pin": load_pin}
     if LOAD_PIN_SYMBOL in symbols:
         summary["load_totals"] = totals(name, peeks, "load_", LOAD_TOTALS)
     noise = ""
@@ -378,7 +431,7 @@ def noise_totals(name, peeks):
 
 
 SUMMARY_COLS = ["scene", "fields", "images", "image_share_at_1", "image_fields_max", "ticks", "lag_ticks",
-                "skipped_ticks", "tick_fields_max", "divisors", "window_start_frame", "settle_tick"]
+                "skipped_ticks", "tick_fields_max", "divisors", "window_start_frame", "settle_tick", "hold_fields"]
 
 
 def flat(summary):
@@ -386,6 +439,7 @@ def flat(summary):
     row["divisors"] = ",".join(map(str, summary["divisors"]))
     row |= {f"img_{k}": v for k, v in summary["fields_per_image"].items()}
     row |= {f"tick_{k}": v for k, v in summary["fields_per_tick"].items()}
+    row |= {f"state_{k}": v for k, v in summary["state_ticks"].items()}
     return row
 
 

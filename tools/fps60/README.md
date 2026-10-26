@@ -42,8 +42,15 @@ tools/fps60/test_harness.py                 # host tests of the F1 tick-set rule
 | `field` | Termina Field | the fade-in and the entrance cutscene are done | stick up |
 | `mountain` | Mountain Village (winter) | the fade-in is done | none |
 | `greatbay` | Great Bay Coast | the fade-in and the entrance cutscene are done | none |
+| `pause` | South Clock Town | the fade-in is done | Start at tick 10 (open), R at 80 (turn to the map page), Start at 150 (close), one tick each |
+| `transition` | Termina Field | the fade-in and the entrance cutscene are done | stick down: back through the gate tunnel into West Clock Town (fade out, scene load, fade in, title card) |
+| `blur` | South Clock Town, Deku Link (`south_clock_town_deku`) | the fade-in is done | C-down at tick 10: the Deku Mask comes off and Link transforms to human |
+| `moving` | Termina Field | the fade-in and the entrance cutscene are done | stick up for 40 ticks, then one full stick circle over 300 ticks: Link runs over the bridge, along the town wall and onto the grass while the camera turns behind him |
 
-The routes are mmbench's (`tools/n64-timing/mmbench` in the ares fork) moved to ticks. `field` keeps the stick up because mmbench's turn runs Link into a wall after the entrance cutscene. Neither moving route opens a textbox (checked on frame dumps at window fields 5, 300 and 599).
+The first six routes are mmbench's (`tools/n64-timing/mmbench` in the ares fork) moved to ticks. The last four are the entry criteria of P2-ref part a (`docs/fps60/architecture.md`, Q9). Each one's feature shows in its `state_ticks` (see Retail holds and tick states below), and `docs/fps60/baseline.md` has the counts. No route opens a textbox (frame dumps at window fields 0, 60, 120, 200, 280, 360, 450 and 599).
+
+- `blur` uses motion blur because the transformation action (`Player_Action_86`, `z_player.c`) calls `Play_EnableMotionBlurPriority(100)`, and `Play_DrawMotionBlur` (`z_play.c`) blends the previous image while `R_MOTION_BLUR_PRIORITY_ENABLED` is set. A Deku boot puts the Deku Mask on C-down (`Sram_InitDebugSave`).
+- `transition` is a scene change, not a tile transition. MM never sets `gTransitionTileState` to `TRANS_TILE_SETUP` (no writer in `src/`), so the tile path of `Play_Update` and its divisor-1 ticks are unreachable in retail; `state_ticks.tile` stays 0. `field` keeps the stick up because mmbench's turn runs Link into a wall after the entrance cutscene. Neither moving route opens a textbox (checked on frame dumps at window fields 5, 300 and 599).
 
 ## How the harness reads the game
 
@@ -53,6 +60,23 @@ A displayed image is a change of `VI_ORIGIN`. To key images by logic tick, the `
 - `Bench_TagCfb` (`graph.c`) stores the current tick in `cfbTick[i]` when a task takes `sGraphCfbInfos[i]`. `gScheduler.curBuf` names the `CfbInfo` the VI shows, so `cfbTick[curBuf index]` is the tick of the displayed image. `run.py` checks that `VI_ORIGIN` minus `curBuf->framebuffer` is the same in every window field.
 - `settled` and `settleTick` mark the end of the scene's entry. The window starts with the first field after the field in which `settled` became nonzero.
 - Input does not come from the runner. `run.py` patches the scene's inputs into `gBenchConfig.inputs`, and `Bench_ApplyInput` (`game.c`, `GameState_GetInput`) writes them into controller 1 from the first tick after `settleTick`. It derives `prev`, `press` and `rel` as `PadMgr_GetInputNoLock` does. An input therefore reaches the same tick in every build, however long ticks take. A runner script cannot guarantee that, because the next tick's `GameState_GetInput` can run within the field in which the previous tick ended.
+
+### Retail holds and tick states
+
+`Bench_TagCfb` also writes a word per tick into `gBenchProbe.tickState`, a ring of 1024 (`BENCH_STATE_WORD`: tick, divisor and `BENCH_STATE_*` flags), when the tick's gfx task is set up. `run.py` reads the ring after the window and writes it to `states.tsv`, one row per tick from the window's first image to its last. `state_ticks` in `summary.json` counts the ticks with each flag.
+
+| Flag | Set when |
+|---|---|
+| `capture` | the task does not swap (`SREG(33)`, `graph.c`): pause-background, picto and tile captures |
+| `pause_filter` | `R_PAUSE_BG_PRERENDER_STATE` or the pause background's `filterState` is `PROCESS` |
+| `pause`, `page_turn` | `pauseCtx.state` is not `PAUSE_STATE_OFF`; `mainState` is `PAUSE_MAIN_STATE_SWITCHING_PAGE` |
+| `motion_blur` | `R_MOTION_BLUR_ENABLED` or `R_MOTION_BLUR_PRIORITY_ENABLED` |
+| `transition`, `tile` | `transitionTrigger` or `transitionMode` is not off; `gTransitionTileState` is not off |
+| `play` | the game state is Play |
+
+`hold_fields` counts the window fields that repeat the previous image because retail holds it (preferences line 24). For each complete image of tick T lasting n fields: n - 1 when T is a `pause_filter` tick, otherwise the smaller of n - 1 and the divisors of the `capture` ticks between T and the next image's tick. Any other repeated field is not a hold. The pass rules do not change: `hold_fields` is reported next to `image_share_at_1`, for the rule that will excuse them.
+
+A capture tick takes a `CfbInfo` without swapping, so the next tick can take the `CfbInfo` the VI still shows (`sCfbIndex` in `graph.c`). Until the VI swaps, `curBuf` names the new tick while the old image is on screen. `run.py` gives such a field the previous field's image when its VI origin is unchanged, and counts it in `retaken_cfb_fields`. Any other origin mismatch still fails the run.
 
 ### Keyframes in a 60 fps build
 
@@ -68,8 +92,9 @@ A retail-architecture build presents one image per logic tick, so every image is
 | `<scene>/fields.tsv` | One row per window field. Columns are listed below. |
 | `<scene>/images.tsv` | Every complete image: `image_tick`, `image` (index within its tick), `keyframe`, `first_field`, `fields`, `final_frame`, `fb_hash`, `hash_changes`, and with the noise pin on the noise record columns of `keyframes.tsv`. F2 and `stale_reads.py` read it. |
 | `<scene>/keyframes.tsv` | The per-tick image sequence: one row per complete keyframe image, with `image_tick`, `first_field`, `fields` shown, `final_frame` (stats row of its last field), `fb_hash` at its last field, and `hash_changes` (times `fb_hash` changed while it was shown, 0 when the framebuffer was not written while displayed). With the noise pin on, also that tick's walk: `noise_hash`, `noise_cmds`, `noise_patched` and `dl_cmds` (`BenchNoiseRecord`). |
+| `<scene>/states.tsv` | One row per tick from the window's first image to its last: `tick`, `divisor`, `flags` and one 0/1 column per `BENCH_STATE_*` flag (see Retail holds and tick states). |
 | `<scene>/ticks.tsv` | One row per complete tick: `tick`, `first_field` its first image appears, `fields` until the next tick's first image, `divisor`, and `skipped_after` (ticks after it that never appeared). |
-| `<scene>/summary.json` | `noise_pin`, `noise_pin_mode`, `load_pin`, `load_totals` (`BenchLoadTotals` after the window, see Load pin), and with the noise pin on `noise_totals` (`BenchNoiseTotals` after the window), `noise_cmds_per_keyframe_max` and `noise_patched_in_window`. `fields`, `images`, `fields_per_image` (counts at 1 to 5 and 6 or more), `image_share_at_1`, `image_fields_max`, `ticks`, `fields_per_tick`, `lag_ticks`, `skipped_ticks`, `tick_fields_max`, `divisors`, `keyframes`, `first_tick`, `last_tick`, `window_start_frame`, `settle_tick`, `retrace_ticks`. |
+| `<scene>/summary.json` | `noise_pin`, `noise_pin_mode`, `load_pin`, `load_totals` (`BenchLoadTotals` after the window, see Load pin), and with the noise pin on `noise_totals` (`BenchNoiseTotals` after the window), `noise_cmds_per_keyframe_max` and `noise_patched_in_window`. `fields`, `images`, `fields_per_image` (counts at 1 to 5 and 6 or more), `image_share_at_1`, `image_fields_max`, `ticks`, `fields_per_tick`, `lag_ticks`, `skipped_ticks`, `tick_fields_max`, `divisors`, `keyframes`, `first_tick`, `last_tick`, `window_start_frame`, `settle_tick`, `retrace_ticks`, `hold_fields`, `retaken_cfb_fields`, `state_ticks`. |
 | `<scene>/stats.tsv` | The runner's per-field stats for the whole run (the runner's README, Per-field stats). |
 | `<scene>/script.txt`, `events.txt` | The generated runner script, and its mark and peek lines. |
 | `<scene>/guest.txt` | The ROM's IS-Viewer output (the `BENCH START` line). |

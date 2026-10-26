@@ -32,16 +32,18 @@ typedef struct BenchScene {
     u16 entrance;
     u16 day;
     s32 time;
+    u8 form; // PLAYER_FORM_*
 } BenchScene;
 
 static BenchScene sBenchScenes[] = {
-    { "south_clock_town", BENCH_KIND_PLAY, 0, ENTRANCE(SOUTH_CLOCK_TOWN, 0), 1, CLOCK_TIME(12, 0) },
-    { "termina_field", BENCH_KIND_PLAY, 0, ENTRANCE(TERMINA_FIELD, 0), 1, CLOCK_TIME(10, 0) },
-    { "mountain_village_winter", BENCH_KIND_PLAY, 0, ENTRANCE(MOUNTAIN_VILLAGE_WINTER, 0), 1, CLOCK_TIME(10, 0) },
-    { "great_bay_coast", BENCH_KIND_PLAY, 0, ENTRANCE(GREAT_BAY_COAST, 0), 1, CLOCK_TIME(10, 0) },
-    { "file_select_empty", BENCH_KIND_FILE_SELECT, 0, 0, 0, 0 },
-    { "file_select_named", BENCH_KIND_FILE_SELECT, 2, 0, 0, 0 },
-    { "retail_boot", BENCH_KIND_RETAIL, 0, 0, 0, 0 },
+    { "south_clock_town", BENCH_KIND_PLAY, 0, ENTRANCE(SOUTH_CLOCK_TOWN, 0), 1, CLOCK_TIME(12, 0), PLAYER_FORM_HUMAN },
+    { "termina_field", BENCH_KIND_PLAY, 0, ENTRANCE(TERMINA_FIELD, 0), 1, CLOCK_TIME(10, 0), PLAYER_FORM_HUMAN },
+    { "mountain_village_winter", BENCH_KIND_PLAY, 0, ENTRANCE(MOUNTAIN_VILLAGE_WINTER, 0), 1, CLOCK_TIME(10, 0), PLAYER_FORM_HUMAN },
+    { "great_bay_coast", BENCH_KIND_PLAY, 0, ENTRANCE(GREAT_BAY_COAST, 0), 1, CLOCK_TIME(10, 0), PLAYER_FORM_HUMAN },
+    { "file_select_empty", BENCH_KIND_FILE_SELECT, 0, 0, 0, 0, 0 },
+    { "file_select_named", BENCH_KIND_FILE_SELECT, 2, 0, 0, 0, 0 },
+    { "retail_boot", BENCH_KIND_RETAIL, 0, 0, 0, 0, 0 },
+    { "south_clock_town_deku", BENCH_KIND_PLAY, 0, ENTRANCE(SOUTH_CLOCK_TOWN, 0), 1, CLOCK_TIME(12, 0), PLAYER_FORM_DEKU },
 };
 
 // retraceTicks is the gIrqMgrRetraceTime that IrqMgr measures on the fps60 runner (BENCH START line)
@@ -66,6 +68,9 @@ static BenchField sBenchFieldRing[BENCH_FIELD_RING];
 static BenchTick sBenchTickRing[BENCH_TICK_RING];
 static volatile BenchField* sBenchFields;
 static volatile BenchTick* sBenchTicks;
+static u32 sBenchStateRing[BENCH_STATE_RING];
+static volatile u32* sBenchStates = NULL;
+static GameState* sBenchGameState; // the game state of the open tick
 static u32 sBenchFieldSeq = 0;
 static u32 sBenchActorTime[2 * ACTOR_ID_MAX];
 static u32 sBenchActorBegin;
@@ -172,8 +177,9 @@ static void Bench_BootPlay(GameState* gameState, BenchScene* scene) {
     // MapSelect_Init's cutscene, form and age. SaveContext_Init leaves playerForm 0, Fierce Deity.
     gSaveContext.fileNum = 0xFF;
     gSaveContext.save.cutsceneIndex = 0;
-    gSaveContext.save.playerForm = PLAYER_FORM_HUMAN;
+    gSaveContext.save.playerForm = scene->form;
     gSaveContext.save.linkAge = 0;
+    // A form other than human gets its mask on C-down, which transforms Link back to human
     Sram_InitDebugSave();
 
     gSaveContext.buttonStatus[EQUIP_SLOT_B] = BTN_ENABLED;
@@ -441,6 +447,10 @@ s32 Bench_Boot(GameState* gameState) {
     sBenchTicks = (volatile BenchTick*)K0_TO_K1(sBenchTickRing);
     gBenchProbe.fields = (BenchField*)sBenchFields;
     gBenchProbe.ticks = (BenchTick*)sBenchTicks;
+    osWritebackDCache(sBenchStateRing, sizeof(sBenchStateRing));
+    osInvalDCache(sBenchStateRing, sizeof(sBenchStateRing));
+    sBenchStates = (volatile u32*)K0_TO_K1(sBenchStateRing);
+    gBenchProbe.tickState = (u32*)sBenchStates;
     gBenchProbe.actorTime = sBenchActorTime;
     gBenchProbe.layout = (sizeof(BenchField) << 24) | (BENCH_FIELD_RING << 20) | (sizeof(BenchTick) << 10) | BENCH_TICK_RING;
     gBenchProbe.actorIds = ACTOR_ID_MAX;
@@ -482,6 +492,7 @@ static s32 Bench_InScene(GameState* gameState) {
 }
 
 void Bench_BeginFrame(GameState* gameState) {
+    sBenchGameState = gameState;
     if (!gBenchCpuClock.enabled) {
         gBenchProbe.tick++;
         return;
@@ -524,8 +535,50 @@ static void Bench_UpdateProbe(GameState* gameState) {
     gBenchProbe.settled = true;
 }
 
+/**
+ * The BENCH_STATE_* flags of the open tick, read when its gfx task is set up.
+ */
+static u32 Bench_TickState(GameState* gameState) {
+    u32 flags = 0;
+
+    if (!(gameState->gfxCtx->task.flags & OS_SC_SWAPBUFFER)) {
+        flags |= BENCH_STATE_CAPTURE;
+    }
+    if (R_MOTION_BLUR_ENABLED || R_MOTION_BLUR_PRIORITY_ENABLED) {
+        flags |= BENCH_STATE_MOTION_BLUR;
+    }
+    if (gameState->destroy == Play_Destroy) {
+        PlayState* play = (PlayState*)gameState;
+
+        flags |= BENCH_STATE_PLAY;
+        if ((R_PAUSE_BG_PRERENDER_STATE == PAUSE_BG_PRERENDER_PROCESS) ||
+            (play->pauseBgPreRender.filterState == PRERENDER_FILTER_STATE_PROCESS)) {
+            flags |= BENCH_STATE_PAUSE_FILTER;
+        }
+        if (play->pauseCtx.state != PAUSE_STATE_OFF) {
+            flags |= BENCH_STATE_PAUSE;
+            if (play->pauseCtx.mainState == PAUSE_MAIN_STATE_SWITCHING_PAGE) {
+                flags |= BENCH_STATE_PAGE_TURN;
+            }
+        }
+        if ((play->transitionTrigger != TRANS_TRIGGER_OFF) || (play->transitionMode != TRANS_MODE_OFF)) {
+            flags |= BENCH_STATE_TRANSITION;
+        }
+        if (gTransitionTileState != TRANS_TILE_OFF) {
+            flags |= BENCH_STATE_TILE;
+        }
+    }
+    return flags;
+}
+
 void Bench_TagCfb(CfbInfo* cfb) {
-    gBenchProbe.cfbTick[cfb - sGraphCfbInfos] = gBenchProbe.tick;
+    u32 tick = gBenchProbe.tick;
+
+    gBenchProbe.cfbTick[cfb - sGraphCfbInfos] = tick;
+    if (sBenchStates != NULL) {
+        sBenchStates[tick % BENCH_STATE_RING] =
+            BENCH_STATE_WORD(tick, sBenchGameState->framerateDivisor, Bench_TickState(sBenchGameState));
+    }
 }
 
 /**
