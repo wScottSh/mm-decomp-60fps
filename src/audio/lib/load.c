@@ -14,6 +14,9 @@
 #include "audio/load.h"
 #include "buffers.h"
 #include "attributes.h"
+#if BENCH
+#include "bench.h"
+#endif
 
 /**
  * SoundFont Notes:
@@ -1708,10 +1711,16 @@ void AudioLoad_ProcessAsyncLoad(AudioAsyncLoad* asyncLoad, s32 resetStatus) {
         osRecvMesg(&asyncLoad->msgQueue, NULL, OS_MESG_BLOCK);
         asyncLoad->status = LOAD_STATUS_WAITING;
         return;
+#if BENCH
+    } else if (osRecvMesg(&asyncLoad->msgQueue, NULL, Bench_AudioPinLoads() ? OS_MESG_BLOCK : OS_MESG_NOBLOCK) == -1) {
+        return;
+    }
+#else
     } else if (osRecvMesg(&asyncLoad->msgQueue, NULL, OS_MESG_NOBLOCK) == -1) {
         // If the previous DMA step isn't done, return.
         return;
     }
+#endif
 
     if (asyncLoad->bytesRemaining == 0) {
         AudioLoad_FinishAsyncLoad(asyncLoad);

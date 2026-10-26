@@ -5,6 +5,9 @@
  */
 #include "global.h"
 #include "audio/effects.h"
+#if BENCH
+#include "bench.h"
+#endif
 
 AudioTask* AudioThread_UpdateImpl(void);
 void AudioThread_SetFadeOutTimer(s32 seqPlayerIndex, s32 fadeTimer);
@@ -16,7 +19,16 @@ s32 AudioThread_GetSamplePos(s32 seqPlayerIndex, s32 channelIndex, s32 layerInde
 s32 AudioThread_CountAndReleaseNotes(s32 flags);
 
 AudioTask* AudioThread_Update(void) {
+#if BENCH
+    AudioTask* task;
+
+    Bench_AudioFrameBegin();
+    task = AudioThread_UpdateImpl();
+    Bench_AudioFrameEnd();
+    return task;
+#else
     return AudioThread_UpdateImpl();
+#endif
 }
 
 AudioTask* AudioThread_UpdateImpl(void) {
@@ -54,10 +66,17 @@ AudioTask* AudioThread_UpdateImpl(void) {
     index = (gAudioCtx.curAiBufferIndex + 1) % 3;
 
     // Division converts size to numSamples: 2 channels (left/right) * 2 bytes per sample
+#if BENCH
+    numSamplesRemainingInAi = Bench_AudioAiLength(osAiGetLength()) / (2 * SAMPLE_SIZE);
+#else
     numSamplesRemainingInAi = osAiGetLength() / (2 * SAMPLE_SIZE);
+#endif
 
     if (gAudioCtx.resetTimer < 16) {
         if (gAudioCtx.numSamplesPerFrame[index] != 0) {
+#if BENCH
+            Bench_AudioSubmit(gAudioCtx.aiBuffers[index], 2 * gAudioCtx.numSamplesPerFrame[index] * (s32)SAMPLE_SIZE);
+#endif
             osAiSetNextBuffer(gAudioCtx.aiBuffers[index], 2 * gAudioCtx.numSamplesPerFrame[index] * (s32)SAMPLE_SIZE);
             if (gAudioCtx.aiBuffers[index]) {}
             if (gAudioCtx.numSamplesPerFrame[index]) {}
@@ -134,7 +153,11 @@ AudioTask* AudioThread_UpdateImpl(void) {
     j = 0;
     if (gAudioCtx.resetStatus == 0) {
         // msg = 0000RREE R = read pos, E = End Pos
+#if BENCH
+        while (Bench_AudioCmdsDue() && (osRecvMesg(gAudioCtx.threadCmdProcQueueP, (OSMesg*)&msg, OS_MESG_NOBLOCK) != -1)) {
+#else
         while (osRecvMesg(gAudioCtx.threadCmdProcQueueP, (OSMesg*)&msg, OS_MESG_NOBLOCK) != -1) {
+#endif
             //! FAKE:
             if (1) {}
             AudioThread_ProcessCmds(msg);
@@ -153,13 +176,25 @@ AudioTask* AudioThread_UpdateImpl(void) {
         AudioSynth_Update(gAudioCtx.curAbiCmdBuf, &numAbiCmds, curAiBuffer, gAudioCtx.numSamplesPerFrame[index]);
 
     // Update audioRandom to the next random number
-    gAudioCtx.audioRandom = (gAudioCtx.audioRandom + gAudioCtx.totalTaskCount) * osGetCount();
-    gAudioCtx.audioRandom = gAudioCtx.audioRandom + gAudioCtx.aiBuffers[index][gAudioCtx.totalTaskCount & 0xFF];
+#if BENCH
+    if (gBenchAudioConfig.pin & BENCH_AUDIO_PIN_RANDOM) {
+        gAudioCtx.audioRandom = Bench_AudioRandom(gAudioCtx.audioRandom, gAudioCtx.totalTaskCount);
+    } else
+#endif
+    {
+        gAudioCtx.audioRandom = (gAudioCtx.audioRandom + gAudioCtx.totalTaskCount) * osGetCount();
+        gAudioCtx.audioRandom = gAudioCtx.audioRandom + gAudioCtx.aiBuffers[index][gAudioCtx.totalTaskCount & 0xFF];
+    }
 
     // gWaveSamples[8] interprets compiled assembly code as s16 samples as a way to generate sound with noise.
     // Start with the address of AudioThread_Update(), and offset it by a random number between 0 - 0xFFF0
     // Use the resulting address as the starting address to interpret an array of samples i.e. `s16 samples[]`
     gWaveSamples[8] = (s16*)((u8*)AudioThread_Update + (gAudioCtx.audioRandom & 0xFFF0));
+#if BENCH
+    if (gBenchAudioConfig.pin & BENCH_AUDIO_PIN_RANDOM) {
+        gWaveSamples[8] = Bench_AudioNoiseWave(gAudioCtx.audioRandom);
+    }
+#endif
 
     index = gAudioCtx.rspTaskIndex;
     gAudioCtx.curTask->taskQueue = NULL;
@@ -432,6 +467,9 @@ s32 AudioThread_ScheduleProcessCmds(void) {
     ret = osSendMesg(gAudioCtx.threadCmdProcQueueP,
                      (void*)(((gAudioCtx.threadCmdReadPos & 0xFF) << 8) | (gAudioCtx.threadCmdWritePos & 0xFF)),
                      OS_MESG_NOBLOCK);
+#if BENCH
+    Bench_AudioCmdsSent(ret != -1);
+#endif
     if (ret != -1) {
         gAudioCtx.threadCmdReadPos = gAudioCtx.threadCmdWritePos;
         ret = 0;
@@ -569,7 +607,13 @@ s32 AudioThread_ResetAudioHeap(s32 specId) {
             gAudioCtx.specId = specId;
             return -3;
         } else {
+#if BENCH
+            Bench_AudioGraphWait(true);
+#endif
             osRecvMesg(gAudioCtx.audioResetQueueP, &msg, OS_MESG_BLOCK);
+#if BENCH
+            Bench_AudioGraphWait(false);
+#endif
         }
     }
 
@@ -966,6 +1010,9 @@ u32 AudioThread_NextRandom(void) {
     static u32 sAudioOsCount = 0x11111111;
     u32 count = osGetCount();
 
+#if BENCH
+    count = Bench_AudioCount(count);
+#endif
     sAudioRandom = (gAudioCtx.totalTaskCount + sAudioRandom + count) * (gAudioCtx.audioRandom + 0x1234567);
     sAudioRandom = (sAudioRandom & 1) + (sAudioRandom * 2) + sAudioOsCount;
     sAudioOsCount = count;

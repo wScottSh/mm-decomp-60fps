@@ -21,6 +21,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import audio  # noqa: E402
 import corpus  # noqa: E402
 import load  # noqa: E402
 
@@ -97,7 +98,7 @@ def patch_rom(rom, scene, noise_pin):
     return bytes(data), retrace
 
 
-def script(symbols, window, noise_pin):
+def script(symbols, window, noise_pin, audio_pin=0):
     probe = symbols["gBenchProbe"]
     keyframe = symbols.get(KEYFRAME_SYMBOL)
 
@@ -118,6 +119,8 @@ def script(symbols, window, noise_pin):
         per_field += [f"peek n{i}_{k} {a(PROBE_CFB_NOISE + NOISE_RECORD_SIZE * i + 4 * j)} w"
                       for i in range(CFB_COUNT) for j, k in enumerate(NOISE_RECORD)]
         end = [f"peek total_{k} {a(PROBE_NOISE_TOTALS + 4 * j)} w" for j, k in enumerate(NOISE_TOTALS)]
+    if audio_pin & audio.HASH:
+        end += audio.end_steps(symbols)
     return steps + per_field * window + load.end_steps(probe) + end + ["stop"]
 
 
@@ -268,13 +271,14 @@ def write_tsv(path, rows, keys=None):
     Path(path).write_text("\t".join(keys) + "\n" + "".join("\t".join(str(r[k]) for k in keys) + "\n" for r in rows))
 
 
-def run_scene(rom, symbols, runner, scene, out, noise_pin, dump_frames=()):
+def run_scene(rom, symbols, runner, scene, out, noise_pin, dump_frames=(), audio_pin=0):
     name = scene["name"]
     scene_dir = out / name
     rom_bytes, retrace = patch_rom(rom, scene, noise_pin)
+    rom_bytes = audio.patch_rom(rom_bytes, symbols, audio_pin)
     window = scene.get("window", corpus.WINDOW)
-    stdout, events, host, wall = run_runner(runner, rom_bytes, script(symbols, window, noise_pin), scene_dir,
-                                            dump_frames)
+    stdout, events, host, wall = run_runner(runner, rom_bytes, script(symbols, window, noise_pin, audio_pin),
+                                            scene_dir, dump_frames)
     (scene_dir / "guest.txt").write_text(stdout)
     (scene_dir / "events.txt").write_text("\n".join(events) + "\n")
     (scene_dir / "host.txt").write_text("\n".join(host) + "\n")
@@ -310,6 +314,9 @@ def run_scene(rom, symbols, runner, scene, out, noise_pin, dump_frames=()):
                  f"{totals['mismatch']}")
     (scene_dir / "summary.json").write_text(json.dumps(summary, indent=1) + "\n")
     summary["load"] = load.analyze(name, peeks, marks["window"], window, stats_rows, scene_dir, write_tsv)
+    if audio_pin & audio.HASH:
+        summary["audio"] = audio.analyze(name, peeks, audio_pin, scene_dir, write_tsv)
+        (scene_dir / "audio_summary.json").write_text(json.dumps(summary["audio"], indent=1) + "\n")
     print(f"{name}: measured {summary['fields']} fields, {summary['images']} images, {summary['ticks']} ticks "
           f"({wall[0]:.1f} s){noise}", flush=True)
     bad = [k for k in NOISE_MUST_BE_ZERO if noise_pin and summary["noise_totals"][k]]
@@ -365,6 +372,8 @@ def main():
     p.add_argument("--noise-pin", choices=list(NOISE_PIN), default="on",
                    help="off: retail RDP noise, for perf runs. on (default): fidelity runs. check: as on, and "
                    "each task is walked twice to check the walk is idempotent (README, Noise pin)")
+    p.add_argument("--audio-pin", help="off, hash (record AI buffer hashes only), on (hashes and every audio "
+                   "pin), or a BENCH_AUDIO_* mask. Default: on unless --noise-pin is off (README, Audio pin)")
     p.add_argument("--check-determinism", action="store_true",
                    help="run twice into OUT/run1 and OUT/run2; fail unless every output but wall time matches")
     args = p.parse_args()
@@ -380,6 +389,7 @@ def main():
     runner_digest = check_runner(args.runner)
     rom, symbols = load_rom(args.rom, map_path)
     args.noise_pin = None if args.noise_pin == "off" else args.noise_pin
+    args.audio_pin = audio.parse_pin(args.audio_pin or ("on" if args.noise_pin else "off"))
     if args.noise_pin and NOISE_PIN_SYMBOL not in symbols:
         raise SystemExit(f"{map_path}: no {NOISE_PIN_SYMBOL}; this ROM predates the noise pin, run it with "
                          "--noise-pin off")
@@ -409,14 +419,15 @@ def measure(args, map_path, names, by_name, runner_digest, rom, symbols, out):
     meta = {"rom": str(args.rom.resolve()), "rom_sha256": sha256(args.rom), "map": str(map_path.resolve()),
             "map_sha256": sha256(map_path), "runner": str(args.runner), "runner_sha256": runner_digest,
             "gBenchProbe": f"0x{symbols['gBenchProbe']:08X}", "keyframe_symbol": KEYFRAME_SYMBOL in symbols,
-            "noise_pin": bool(args.noise_pin), "noise_pin_mode": args.noise_pin or "off", "scenes": names}
+            "noise_pin": bool(args.noise_pin), "noise_pin_mode": args.noise_pin or "off",
+            "audio_pin": args.audio_pin, "scenes": names}
     (out / "meta.json").write_text(json.dumps(meta, indent=1) + "\n")
 
     load_before = os.getloadavg()[0]
     began = time.perf_counter()
     with ThreadPoolExecutor(max_workers=args.jobs) as pool:
-        futures = {n: pool.submit(run_scene, rom, symbols, args.runner, by_name[n], out, args.noise_pin)
-                   for n in names}
+        futures = {n: pool.submit(run_scene, rom, symbols, args.runner, by_name[n], out, args.noise_pin,
+                                  audio_pin=args.audio_pin) for n in names}
         results = {n: f.result() for n, f in futures.items()}
     total = time.perf_counter() - began
 

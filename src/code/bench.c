@@ -50,6 +50,8 @@ BenchConfig gBenchConfig = {
 
 BenchProbe gBenchProbe;
 
+static void Bench_AudioSettle(void);
+
 extern CfbInfo sGraphCfbInfos[3];
 
 static BenchScene* sBenchScene;
@@ -521,6 +523,7 @@ static void Bench_UpdateProbe(GameState* gameState) {
     }
     gBenchProbe.settleTick = gBenchProbe.tick;
     gBenchProbe.settled = true;
+    Bench_AudioSettle();
 }
 
 void Bench_TagCfb(CfbInfo* cfb) {
@@ -949,4 +952,288 @@ void Bench_PinNoise(CfbInfo* cfb, Gfx* taskList) {
     gBenchProbe.noise.visited += walk->record.visited;
     gBenchProbe.noise.commands += walk->record.commands;
     gBenchProbe.noise.patched += walk->record.patched;
+}
+
+/**
+ * Audio fidelity (F4). The audio thread runs one AudioThread_Update per VI retrace, and five paths carry
+ * its timing into the PCM it synthesizes. The audio pin (gBenchAudioConfig.pin) fixes each one, so that a
+ * fidelity run's audio depends on the game alone, as the noise pin does for pixels:
+ *
+ *  - Commands. Audio_Update queues tick N's commands on the graph thread, and the next AudioThread_Update
+ *    to run takes them (thread.c, the threadCmdProcQueueP loop), so a tick that runs faster or slower
+ *    moves its sounds by a frame. The game also reads audio-thread state in Audio_Update. With
+ *    BENCH_AUDIO_PIN_CMDS the threads run in lockstep: tick N is due at audio frame D(N), with
+ *    D(N + 1) = D(N) + framerateDivisor. Audio_Update(N) starts after frame D(N) - 1 ends, and frame D(N)
+ *    starts after Audio_Update(N) ends and takes only commands sent up to then; commands sent later in the
+ *    tick wait for D(N + 1). While the graph thread waits for an audio heap reset (thread.c, sequence.c),
+ *    frames run on until the reset is done.
+ *  - Buffer size. Each frame sizes its buffer from osAiGetLength, the AI's progress at the instant the
+ *    thread reads it. BENCH_AUDIO_PIN_AI reads a model instead: the AI's two-buffer FIFO draining
+ *    aiSamplingFreq * retraceTicks / OS_CPU_COUNTER samples per frame.
+ *  - Randomness. audioRandom and AudioThread_NextRandom mix in osGetCount, and audioRandom also reads a
+ *    cached word of an AI buffer that the RSP rewrites. The noise wave (gWaveSamples[8]) plays code bytes
+ *    at a random offset from AudioThread_Update, so any code change changes it. BENCH_AUDIO_PIN_RANDOM
+ *    uses a fixed sequence and a fixed noise table.
+ *  - Async loads. A chunk is polled each frame (load.c, AudioLoad_ProcessAsyncLoad), so it lands on the
+ *    frame after its DMA ends. BENCH_AUDIO_PIN_LOADS waits for the DMA on the first poll.
+ *
+ * Bench_AudioSubmit hashes each buffer as osAiSetNextBuffer receives it, read through KSEG1: RDRAM is
+ * what the AI's DMA plays. AudioMgr waited for the RSP task that wrote it in the previous frame.
+ */
+BenchAudioConfig gBenchAudioConfig = { BENCH_AUDIO_MAGIC, 0 };
+
+BenchAudio gBenchAudio;
+
+static BenchAudioFrame sBenchAudioRing[BENCH_AUDIO_RING];
+static volatile BenchAudioFrame* sBenchAudioFrames;
+static s32 sBenchAudioReady = false;
+static OSMesgQueue sBenchAudioGate; // wakes the audio thread
+static OSMesg sBenchAudioGateMsg[1];
+static OSMesgQueue sBenchGraphGate; // wakes the graph thread
+static OSMesg sBenchGraphGateMsg[1];
+static volatile u32 sBenchAudioDone = 0;    // frames ended
+static volatile u32 sBenchAudioNextDue = 0; // D of the next Audio_Update; frames before it may run
+static volatile u32 sBenchAudioSendDue = 0; // D of the commands the graph thread sends now
+static volatile s32 sBenchAudioGraphWaiting = false;
+static u32 sBenchAudioFrame;   // the running frame
+static u32 sBenchAudioAiLen;   // its osAiGetLength
+static u32 sBenchAudioAiUsed;
+static u32 sBenchAudioTags[16]; // D of each batch in threadCmdProcQueueP, in queue order
+static u32 sBenchAudioTagHead = 0;
+static u32 sBenchAudioTagCount = 0;
+static u32 sBenchAudioAiFifo[2]; // AI model: samples << 10 left in the playing and the queued buffer
+static u32 sBenchAudioCount = 0x12345678;
+static s16 sBenchAudioNoise[0x2000];
+
+static void Bench_AudioInit(void) {
+    OSIntMask mask = __osDisableInt();
+    u32 x = 0x9E3779B9;
+    s32 i;
+
+    if (!sBenchAudioReady) {
+        osCreateMesgQueue(&sBenchAudioGate, sBenchAudioGateMsg, ARRAY_COUNT(sBenchAudioGateMsg));
+        osCreateMesgQueue(&sBenchGraphGate, sBenchGraphGateMsg, ARRAY_COUNT(sBenchGraphGateMsg));
+        osWritebackDCache(sBenchAudioRing, sizeof(sBenchAudioRing));
+        osInvalDCache(sBenchAudioRing, sizeof(sBenchAudioRing));
+        sBenchAudioFrames = (volatile BenchAudioFrame*)K0_TO_K1(sBenchAudioRing);
+        gBenchAudio.ring = (BenchAudioFrame*)sBenchAudioFrames;
+        gBenchAudio.layout = (sizeof(BenchAudioFrame) << 16) | BENCH_AUDIO_RING;
+        for (i = 0; i < ARRAY_COUNT(sBenchAudioNoise); i++) {
+            x ^= x << 13;
+            x ^= x >> 17;
+            x ^= x << 5;
+            sBenchAudioNoise[i] = x;
+        }
+        gBenchAudio.magic = BENCH_AUDIO_MAGIC;
+        sBenchAudioReady = true;
+    }
+    __osRestoreInt(mask);
+}
+
+static s32 Bench_AudioPinned(u32 pin) {
+    return (gBenchAudioConfig.pin & pin) != 0;
+}
+
+void Bench_AudioFrameBegin(void) {
+    u32 frame = gBenchAudio.frames;
+    s32 waited = false;
+
+    Bench_AudioInit();
+    if (Bench_AudioPinned(BENCH_AUDIO_PIN_CMDS)) {
+        while (!((frame < sBenchAudioNextDue) || (sBenchAudioGraphWaiting && (gAudioCtx.resetStatus != 0)))) {
+            waited = true;
+            osRecvMesg(&sBenchAudioGate, NULL, OS_MESG_BLOCK);
+        }
+        if (frame >= sBenchAudioNextDue) {
+            gBenchAudio.resetFrames++;
+        }
+        if (waited) {
+            gBenchAudio.audioWaits++;
+        }
+    }
+    sBenchAudioFrame = frame;
+    sBenchAudioAiLen = sBenchAudioAiUsed = 0;
+    gBenchAudio.frames = frame + 1;
+}
+
+void Bench_AudioFrameEnd(void) {
+    sBenchAudioDone = sBenchAudioFrame + 1;
+    osSendMesg(&sBenchGraphGate, NULL, OS_MESG_NOBLOCK);
+}
+
+void Bench_AudioUpdateBegin(GameState* gameState) {
+    u32 due;
+    s32 waited = false;
+
+    Bench_AudioInit();
+    if (!Bench_AudioPinned(BENCH_AUDIO_PIN_CMDS)) {
+        return;
+    }
+    due = sBenchAudioNextDue;
+    sBenchAudioSendDue = due;
+    while (sBenchAudioDone < due) {
+        waited = true;
+        osRecvMesg(&sBenchGraphGate, NULL, OS_MESG_BLOCK);
+    }
+    if (waited) {
+        gBenchAudio.graphWaits++;
+    }
+}
+
+void Bench_AudioUpdateEnd(GameState* gameState) {
+    u32 next;
+
+    if (!Bench_AudioPinned(BENCH_AUDIO_PIN_CMDS)) {
+        return;
+    }
+    next = sBenchAudioSendDue + gameState->framerateDivisor;
+    // Frames that ran during an audio heap reset wait
+    if (next < gBenchAudio.frames) {
+        next = gBenchAudio.frames;
+    }
+    sBenchAudioSendDue = next;
+    sBenchAudioNextDue = next;
+    osSendMesg(&sBenchAudioGate, NULL, OS_MESG_NOBLOCK);
+}
+
+void Bench_AudioGraphWait(s32 waiting) {
+    sBenchAudioGraphWaiting = waiting;
+    if (waiting) {
+        osSendMesg(&sBenchAudioGate, NULL, OS_MESG_NOBLOCK);
+    }
+}
+
+/**
+ * Called after each send to threadCmdProcQueueP, sent or refused. The audio thread's own send (thread.c,
+ * after AUDIOCMD_OP_GLOBAL_STOP_AUDIOCMDS) is due on its next frame.
+ */
+void Bench_AudioCmdsSent(s32 sent) {
+    OSIntMask mask;
+
+    if (!sent) {
+        gBenchAudio.sendRefused++;
+        return;
+    }
+    if (!Bench_AudioPinned(BENCH_AUDIO_PIN_CMDS)) {
+        return;
+    }
+    mask = __osDisableInt();
+    if (sBenchAudioTagCount == ARRAY_COUNT(sBenchAudioTags)) {
+        gBenchAudio.tagOverflow++;
+    } else {
+        sBenchAudioTags[(sBenchAudioTagHead + sBenchAudioTagCount) % ARRAY_COUNT(sBenchAudioTags)] =
+            (osGetThreadId(NULL) == Z_THREAD_ID_AUDIOMGR) ? sBenchAudioFrame + 1 : sBenchAudioSendDue;
+        sBenchAudioTagCount++;
+    }
+    __osRestoreInt(mask);
+}
+
+/**
+ * Whether the audio thread may take the next batch from threadCmdProcQueueP in this frame.
+ */
+s32 Bench_AudioCmdsDue(void) {
+    OSIntMask mask;
+    s32 due = false;
+
+    if (!Bench_AudioPinned(BENCH_AUDIO_PIN_CMDS)) {
+        return true;
+    }
+    mask = __osDisableInt();
+    if ((sBenchAudioTagCount != 0) && (sBenchAudioTags[sBenchAudioTagHead] <= sBenchAudioFrame)) {
+        sBenchAudioTagHead = (sBenchAudioTagHead + 1) % ARRAY_COUNT(sBenchAudioTags);
+        sBenchAudioTagCount--;
+        due = true;
+    }
+    __osRestoreInt(mask);
+    return due;
+}
+
+u32 Bench_AudioAiLength(u32 aiLen) {
+    u32 used = aiLen;
+
+    if (Bench_AudioPinned(BENCH_AUDIO_PIN_AI)) {
+        u32 left = (u64)gAudioCtx.audioBufferParameters.aiSamplingFreq * gBenchConfig.retraceTicks * 1024 /
+                   OS_CPU_COUNTER;
+
+        while ((left != 0) && (sBenchAudioAiFifo[0] != 0)) {
+            u32 take = MIN(left, sBenchAudioAiFifo[0]);
+
+            sBenchAudioAiFifo[0] -= take;
+            left -= take;
+            if (sBenchAudioAiFifo[0] == 0) {
+                sBenchAudioAiFifo[0] = sBenchAudioAiFifo[1];
+                sBenchAudioAiFifo[1] = 0;
+            }
+        }
+        // osAiGetLength's units: bytes of 16-bit stereo
+        used = (sBenchAudioAiFifo[0] >> 10) * 4;
+    }
+    sBenchAudioAiLen = aiLen;
+    sBenchAudioAiUsed = used;
+    return used;
+}
+
+void Bench_AudioSubmit(void* buf, u32 size) {
+    volatile BenchAudioFrame* rec;
+    volatile u32* word = (volatile u32*)K0_TO_K1(buf);
+    u32 hash = BENCH_FNV_OFFSET;
+    u32 i;
+
+    if (Bench_AudioPinned(BENCH_AUDIO_PIN_AI)) {
+        if (sBenchAudioAiFifo[0] == 0) {
+            sBenchAudioAiFifo[0] = (size / 4) << 10;
+        } else if (sBenchAudioAiFifo[1] == 0) {
+            sBenchAudioAiFifo[1] = (size / 4) << 10;
+        } else {
+            gBenchAudio.aiDropped++;
+        }
+    }
+    if (!Bench_AudioPinned(BENCH_AUDIO_HASH)) {
+        return;
+    }
+    for (i = 0; i < size / 4; i++) {
+        hash = (hash ^ word[i]) * BENCH_FNV_PRIME;
+    }
+    rec = &sBenchAudioFrames[sBenchAudioFrame % BENCH_AUDIO_RING];
+    rec->frame = BENCH_RECORD_WRITING;
+    rec->retrace = sBenchFieldSeq;
+    rec->tick = gBenchProbe.tick;
+    rec->len = size;
+    rec->hash = hash;
+    rec->aiLen = sBenchAudioAiLen;
+    rec->aiUsed = sBenchAudioAiUsed;
+    rec->due = sBenchAudioNextDue;
+    rec->frame = sBenchAudioFrame;
+}
+
+static u32 Bench_AudioNext(void) {
+    sBenchAudioCount = sBenchAudioCount * 1664525 + 1013904223;
+    return sBenchAudioCount;
+}
+
+/**
+ * audioRandom's update in AudioThread_UpdateImpl, without osGetCount and the AI buffer read.
+ */
+u32 Bench_AudioRandom(u32 random, u32 taskCount) {
+    return (random + taskCount) * ((taskCount * 0x9E3779B9) | 1) + 0x6A09E667;
+}
+
+s16* Bench_AudioNoiseWave(u32 random) {
+    return &sBenchAudioNoise[(random & 0xFF0) / sizeof(s16)];
+}
+
+u32 Bench_AudioCount(u32 count) {
+    return Bench_AudioPinned(BENCH_AUDIO_PIN_RANDOM) ? Bench_AudioNext() : count;
+}
+
+s32 Bench_AudioPinLoads(void) {
+    return Bench_AudioPinned(BENCH_AUDIO_PIN_LOADS);
+}
+
+/**
+ * The settle tick's Audio_Update has ended: the next due frame is the first that can carry the window's
+ * input.
+ */
+static void Bench_AudioSettle(void) {
+    gBenchAudio.anchor = Bench_AudioPinned(BENCH_AUDIO_PIN_CMDS) ? sBenchAudioNextDue : gBenchAudio.frames;
 }
