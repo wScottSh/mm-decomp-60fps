@@ -10,7 +10,7 @@ make -j32 BENCH=1                                       # build/n64-us-bench/mm-
 tools/fps60/run.py build/n64-us-bench/mm-n64-us.z64 --out RESULTS
 tools/fps60/run.py build/n64-us-bench/mm-n64-us.z64 --out RESULTS --check-determinism
 tools/fps60/run.py build/n64-us-bench/mm-n64-us.z64 --out RESULTS --noise-pin off   # perf runs: retail RDP noise
-tools/fps60/fidelity.py BASE_RESULTS CAND_RESULTS
+tools/fps60/fidelity.py BASE_RESULTS CAND_RESULTS       # F1 and F4
 ```
 
 - `worktree-setup.sh` creates the worktree (or reuses it), copies the untracked build inputs from `~/repos/mm-decomp-60fps` (baseroms, `extracted/`, the IDO recompilation, `.venv`, `.make_options.mk`), and builds `tools/`. It only reads the main checkout. It copies rather than hard-links, so `make setup` in a worktree cannot write into the main checkout. A worktree takes 723 MB before its first build and 1.19 GB after a `BENCH=1` build. Setup took 7 s on a new worktree and 1 s on a rerun (measured on unicron).
@@ -18,7 +18,8 @@ tools/fps60/fidelity.py BASE_RESULTS CAND_RESULTS
 - A full corpus run took 149 s of wall time with 4 jobs, and each scene took 41 to 102 s (measured on unicron, see `docs/fps60/baseline.md`).
 - `run.py --check-determinism` runs the corpus into `RESULTS/run1` and `RESULTS/run2` and fails unless every file except `wall.tsv` and `host.txt` is byte-identical.
 - `run.py --noise-pin on|off|check` sets the noise pin (see Noise pin below). The default is `on`, for fidelity runs. Perf runs use `off`. `check` is `on` plus a second walk of every gfx task, which must give the same record and patch nothing. With the pin on, `run.py` fails a scene whose walk met an unresolved target, an unknown opcode, an overflow or a check mismatch, and prints the totals.
-- `fidelity.py` exits 0 only when every scene passes. On a failure it runs that scene again from both ROMs, dumps both frames, and writes the ares `framediff.py` report under `CAND_RESULTS/fidelity/<scene>/`. The ROM that a result directory names in `meta.json` must still have the recorded sha256.
+- `run.py --audio-pin off|hash|on|MASK` sets the audio pin (see Audio pin and F4 below). The default is `on` unless `--noise-pin off`, so fidelity runs pin audio and perf runs do not.
+- `fidelity.py` exits 0 only when every scene passes F1 and F4. On a failure it runs that scene again from both ROMs, dumps both frames, and writes the ares `framediff.py` report under `CAND_RESULTS/fidelity/<scene>/`. The ROM that a result directory names in `meta.json` must still have the recorded sha256.
 
 `run.py` fails loudly when the runner exits nonzero, the stop reason is not `script-stop`, the ROM boots a scene other than the one asked for, the window mark is missing, a peek is missing or unreadable, the stats file is short, or the VI origin does not belong to the framebuffer that the harness attributes to it. It prints the fields, images, and ticks it measured per scene and in total.
 
@@ -69,6 +70,8 @@ A retail-architecture build presents one image per logic tick, so every image is
 | `<scene>/load_summary.json` | Per resource, per field and per tick: `max`, `p99`, `p50` in ms and as a share of one field. Per tick also: CPU time per thread (`tick_cpu`), per graph phase in wall and CPU time (`tick_phase_wall`, `tick_phase_cpu`), per system (`tick_system`), thread switches, the top 10 actors by update plus draw time, and the hook cost. |
 | `<scene>/load_fields.tsv` | One row per retrace interval in the window (see Load metrics). |
 | `<scene>/load_ticks.tsv` | One row per logic tick that starts and ends inside the window: the `BenchTick` record (`include/bench.h`) plus `cpu_busy`, `rsp_gfx` and `other_threads`. |
+| `<scene>/audio.tsv` | With the audio pin: one row per AI buffer in the ring (`BenchAudioFrame`, `include/bench.h`): `rel` (frame minus the anchor), `frame`, `retrace`, `tick`, `len`, `hash`, `ai_len` (the real `osAiGetLength`), `ai_used` (what the frame sized its buffer from), `due`, `cmds` and `cmd_hash` (the audio commands processed in the frame that synthesized the buffer). |
+| `<scene>/audio_summary.json` | `BenchAudio` after the window: frames, anchor, the lockstep wait counts, and the counters that must stay 0. |
 | `<scene>/load_actors.tsv` | Graph thread time per actor id over the window, in update and draw, sorted by the sum. |
 
 `fields.tsv` columns:
@@ -154,10 +157,10 @@ Paths that feed timing into game logic and are not pinned. Each one is outside t
 | Site | Feedback | Corpus exposure |
 |---|---|---|
 | `src/code/z_scene.c:93` (object loads), `src/code/z_room.c:608` (room loads), `src/code/z_player_lib.c:208` (mask object), `src/code/z_player_lib.c:2946` (get-item object), `src/code/z_parameter.c:6791` (`Interface_LoadStory`), `src/code/z_play_hireso.c:1167` (Bombers' Notebook) | The tick that polls (`OS_MESG_NOBLOCK`) sees a DMA as done or not done, depending on DMA time against the tick. | Object and room loads happen at scene entry before the window settles. Within the window, a candidate that changes when a DMA completes can change the tick an actor appears. |
-| `AudioSeq_GetActiveSeqId` (12 call sites) and `Audio_IsSequencePlaying` (3) in `src/code` and `src/overlays` | Game logic reads sequence state that the audio thread sets on its own AI-driven schedule. | Sites run in specific actors and cutscenes. None was identified in the corpus scenes. |
+| `AudioSeq_GetActiveSeqId` (12 call sites) and `Audio_IsSequencePlaying` (3) in `src/code` and `src/overlays` | Game logic reads sequence state that Audio_Update copies from the audio thread. | With the audio pin, Audio_Update runs in lockstep with the audio thread, so the state it copies is the same in every build. Without it, timing-dependent. |
 | `src/code/z_parameter.c:829, 890, 5692-6187`, `src/overlays/actors/ovl_En_Mm3/z_en_mm3.c:416` | Minigame, postman and bottle timers count `osGetTime()`, not ticks. | No timer runs in the corpus. |
 | `src/code/z_sram_NES.c:1925-1978` | Flash save writes wait for 2 s of `osGetTime()`. | No save in the windows. |
-| `src/audio/lib/thread.c:156`, `967` | `osGetCount()` seeds audio randomness. | Audio only. Not visible. |
+| `src/audio/lib/thread.c:156`, `967` | `osGetCount()` seeds audio randomness. | Pinned by the audio pin (Audio pin and F4). |
 | `src/code/speed_meter.c:122-128` | Draws `gRSPGfxTimeTotal`, `gRDPTimeTotal` and `gGraphUpdatePeriod`. | Only when `R_ENABLE_ARENA_DBG` is nonzero (`game.c:115`). 0 in the corpus. |
 | RDP noise (hardware, no source line) | The noise LFSRs step once per RDP clock (the fork's `ares/n64/rdp/timed.hpp`, from Thar0/RDP-Noise console dumps). Dithered pixels (alpha dither, color dither, the combiner's NOISE input) depend on when the RDP draws them. | Every scene except `filesel`. With the noise pin off, a change that moves RDP timing changes those pixels by one 5-bit step while the game stays identical, so F1 fails (see `docs/fps60/baseline.md`). The noise pin removes this path for fidelity runs. |
 | `src/code/sched.c:245, 427`, `src/code/graph.c:159` | Frame pacing itself: swaps, retraces, and the 3 s RCP hang timeout. | This is what the harness measures, not a confound. |
@@ -204,6 +207,37 @@ What it cannot detect.
 Cost. The walk visits about 11,500 commands per tick in `sct` (measured, see the H1c report) on the CPU before the task is sent, and 1PRIMITIVE adds RDP time per primitive. Both change timing, but with the pin on timing no longer reaches the image. File select, which already lags in retail, shows fewer ticks in its window with the pin on. Perf runs use `--noise-pin off`, where `Bench_PinNoise` returns at once.
 
 Pin off is retail rendering, not H1a's bytes. Any code or data layout change moves CPU timing and so the RDP clock at each pixel, so a pin-off run of this tree does not reproduce H1a's `fb_hash` values even though the pin-off path only returns (H1c report).
+
+## Audio pin and F4
+
+Preferences line 27: F4 checks that a candidate's audio output is sample-identical to the reference. `Bench_AudioSubmit` (`src/code/bench.c`, called from `AudioThread_UpdateImpl` just before `osAiSetNextBuffer`) hashes each buffer the game hands the AI, FNV-1a over its 32-bit words read through KSEG1, together with its length. RDRAM is what the AI's DMA plays, and AudioMgr waited for the RSP task that wrote the buffer in the previous frame (`src/code/audio_thread_manager.c:47-70`). The records go to a ring of 1024 frames, `gBenchAudio`, which `run.py` reads after the window.
+
+**Why a pin.** Hashing alone fails a dead-code build in every frame of `sct` (measured: 603 of 603 frames, and the anchor itself moves by one frame). The audio thread runs one `AudioThread_Update` per retrace, and six paths carry its timing into the PCM. `gBenchAudioConfig.pin` (`BENCH_AUDIO_*`) fixes each one. Reference and candidate share the pin.
+
+| Retail site (main) | Timing path | Under the pin |
+|---|---|---|
+| `src/audio/lib/thread.c:137`, `src/code/graph.c:271-275`, `src/code/game.c:270` | Audio_Update queues tick N's commands on the graph thread, and whichever audio frame runs next takes them. Audio_Update also reads audio-thread state (SFX channel IO, sequence state, `externalLoadQueue`). | `PIN_CMDS`, lockstep. Tick N is due at audio frame D(N), with D(N + 1) = D(N) + `framerateDivisor`. Audio_Update(N) starts after frame D(N) - 1 ends, and frame D(N) starts after Audio_Update(N) ends. A frame takes only batches due by then: a batch sent later in the tick waits for D(N + 1). While the graph thread waits on an audio heap reset (`thread.c:572`), frames run on until the reset is done. |
+| `src/audio/lib/thread.c:57` | `osAiGetLength` at the instant the thread runs sizes the next buffer. | `PIN_AI`. A model of the AI's two-buffer FIFO, drained by `aiSamplingFreq * retraceTicks / OS_CPU_COUNTER` samples per frame. In `sct` the model reads 524 to 676 bytes, inside retail's 500 to 708 (measured). |
+| `src/audio/lib/thread.c:156-163`, `967` | `audioRandom` and `AudioThread_NextRandom` mix in `osGetCount`. The noise wave (`gWaveSamples[8]`) plays code bytes at a random offset from `AudioThread_Update`, so any code change changes it. | `PIN_RANDOM`. A fixed sequence and a fixed 16 KiB noise table. |
+| `src/audio/code_8019AF00.c:4204` | Link's metal footstep reads `audioRandom` mid-tick while audio frames run. Found by the timing control below: in `sct` tick 28 one build played `NA_SE_PL_METALEFFECT_KID` and the other did not. | The value at the start of the tick's Audio_Update. |
+| `src/audio/lib/load.c:1711` | An async load's chunk lands on the first frame that polls after its DMA ends. | `PIN_LOADS`. The first poll waits for the DMA. |
+| `src/audio/lib/thread.c:73-88` | A frame's synthesis starts sample DMAs that its RSP task reads, but waits for them only at the start of the next frame, after AudioMgr has sent that task. | `PIN_DMA`. The frame waits at its end. Found by the dead-code control: without it, 13 frames near the end of `sct` differed. |
+
+What the pin changes. The lockstep makes the graph thread wait for the audio thread and the reverse (`graph_waits`, `audio_waits`), so a fidelity run's timing is not retail's. It does not touch the image, which the noise pin already makes timing-independent: F1 still passes between builds of different speed. Audio stops during a long tick (a scene load) instead of playing on, and the real AI underruns while the thread waits. Neither is hashed. Perf runs use `--noise-pin off`, which turns the audio pin off too.
+
+**F4.** `fidelity.py` takes each scene's `audio.tsv` and compares `len` and `hash` frame by frame from `rel` 0 over the frames both runs recorded without a gap (at least 300). Both runs must use `--audio-pin on`.
+
+- Alignment. The anchor is D(settleTick + 1), the first frame that can carry the window's input. It is a count of ticks and divisors, so it is the same frame in builds of any speed. Frame `rel` in one build is the same audio frame as `rel` in the other.
+- Latency. A record holds the buffer submitted in that frame, which the frame two before synthesized. A command processed in frame F, tick N's at D(N), shows from `rel` = F + 2 - anchor. The record's `cmds` and `cmd_hash` belong to that synthesizing frame, so in a same-layout comparison the first differing `cmd_hash` and the first differing `hash` are the same row when a command change caused it. `cmd_hash` includes pointers, so builds of different layout differ there by design.
+- `run.py` fails a scene whose `send_refused`, `tag_overflow` or `ai_dropped` is nonzero: a refused batch, an untagged one or a dropped buffer means the pin did not hold.
+
+Measured on `sct` and the corpus (H3 report): reference against itself, a dead-code control, and a timing control that busy-waits 0 to 4.2 ms at the start of each tick (same layout as the control) all pass F4 in all six scenes. Without the pin the dead-code control fails every frame. A planted change that skips one tick's SFX requests (they play one tick later) fails at `rel` 89 = 3 x 29 + 2, its predicted frame. A planted change that lowers one SFX's volume by one step for one tick fails at the frame its command reaches.
+
+What F4 cannot detect.
+
+- Audio the corpus windows never play.
+- A change confined to the first two frames after the anchor's buffers, or past the last compared frame.
+- Timing paths outside the audio thread that change game logic, such as the object-load polls in the table above. F4 reports their effect on sound, as F1 does on pixels. The graph thread also reads BGM channel IO mid-tick in `func_801A3950` and `func_801A39F8` (`code_8019AF00.c:5781`, `5799`); these are not pinned, and no corpus scene reached them (the timing control passes).
 
 ## Gotchas
 

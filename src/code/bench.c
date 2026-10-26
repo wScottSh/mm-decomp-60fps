@@ -955,7 +955,7 @@ void Bench_PinNoise(CfbInfo* cfb, Gfx* taskList) {
 }
 
 /**
- * Audio fidelity (F4). The audio thread runs one AudioThread_Update per VI retrace, and five paths carry
+ * Audio fidelity (F4). The audio thread runs one AudioThread_Update per VI retrace, and six paths carry
  * its timing into the PCM it synthesizes. The audio pin (gBenchAudioConfig.pin) fixes each one, so that a
  * fidelity run's audio depends on the game alone, as the noise pin does for pixels:
  *
@@ -965,7 +965,7 @@ void Bench_PinNoise(CfbInfo* cfb, Gfx* taskList) {
  *    BENCH_AUDIO_PIN_CMDS the threads run in lockstep: tick N is due at audio frame D(N), with
  *    D(N + 1) = D(N) + framerateDivisor. Audio_Update(N) starts after frame D(N) - 1 ends, and frame D(N)
  *    starts after Audio_Update(N) ends and takes only commands sent up to then; commands sent later in the
- *    tick wait for D(N + 1). While the graph thread waits for an audio heap reset (thread.c, sequence.c),
+ *    tick wait for D(N + 1). While the graph thread waits for an audio heap reset (thread.c),
  *    frames run on until the reset is done.
  *  - Buffer size. Each frame sizes its buffer from osAiGetLength, the AI's progress at the instant the
  *    thread reads it. BENCH_AUDIO_PIN_AI reads a model instead: the AI's two-buffer FIFO draining
@@ -973,7 +973,8 @@ void Bench_PinNoise(CfbInfo* cfb, Gfx* taskList) {
  *  - Randomness. audioRandom and AudioThread_NextRandom mix in osGetCount, and audioRandom also reads a
  *    cached word of an AI buffer that the RSP rewrites. The noise wave (gWaveSamples[8]) plays code bytes
  *    at a random offset from AudioThread_Update, so any code change changes it. BENCH_AUDIO_PIN_RANDOM
- *    uses a fixed sequence and a fixed noise table.
+ *    uses a fixed sequence and a fixed noise table. Link's metal footstep (code_8019AF00.c) reads
+ *    audioRandom mid-tick; under the pin it reads the value from the start of the tick's Audio_Update.
  *  - Async loads. A chunk is polled each frame (load.c, AudioLoad_ProcessAsyncLoad), so it lands on the
  *    frame after its DMA ends. BENCH_AUDIO_PIN_LOADS waits for the DMA on the first poll.
  *  - Sample DMAs. A frame's synthesis starts DMAs of sample data that its RSP task reads, and waits for
