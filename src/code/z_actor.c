@@ -7,6 +7,9 @@
 #include "attributes.h"
 #include "sys_cfb.h"
 #include "libu64/loadfragment.h"
+#if BENCH
+#include "bench.h"
+#endif
 
 // Variables are put before most headers as a hacky way to bypass bss reordering
 FaultClient sActorFaultClient; // 2 funcs
@@ -2649,7 +2652,13 @@ Actor* Actor_UpdateActor(UpdateActor_Params* params) {
                     actor->colorFilterTimer--;
                 }
 
+#if BENCH
+                Bench_ActorBegin();
+#endif
                 actor->update(actor, play);
+#if BENCH
+                Bench_ActorEnd(actor->id, false);
+#endif
                 DynaPoly_UnsetAllInteractFlags(play, &play->colCtx.dyna, actor);
             }
 
@@ -2795,6 +2804,9 @@ void Actor_UpdateAll(PlayState* play, ActorContext* actorCtx) {
 void Actor_Draw(PlayState* play, Actor* actor) {
     Lights* light;
 
+#if BENCH
+    Bench_ActorBegin();
+#endif
     OPEN_DISPS(play->state.gfxCtx);
 
     light = LightContext_NewLights(&play->lightCtx, play->state.gfxCtx);
@@ -2866,6 +2878,9 @@ void Actor_Draw(PlayState* play, Actor* actor) {
     actor->isDrawn = true;
 
     CLOSE_DISPS(play->state.gfxCtx);
+#if BENCH
+    Bench_ActorEnd(actor->id, true);
+#endif
 }
 
 void Actor_UpdateFlaggedAudio(Actor* actor) {
@@ -3216,9 +3231,15 @@ void Actor_DrawAll(PlayState* play, ActorContext* actorCtx) {
         }
     }
 
+#if BENCH
+    Bench_SysEnter(BENCH_SYS_EFFECT);
+#endif
     Effect_DrawAll(play->state.gfxCtx);
     EffectSs_DrawAll(play);
     EffFootmark_Draw(play);
+#if BENCH
+    Bench_SysExit();
+#endif
 
     ref2 = POLY_XLU_DISP;
     gSPDisplayList(sp58, &ref2[1]);

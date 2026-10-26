@@ -157,7 +157,13 @@ void Graph_TaskSet00(GraphicsContext* gfxCtx, GameState* gameState) {
 retry:
 #endif
     osSetTimer(&timer, OS_USEC_TO_CYCLES(3 * 1000 * 1000), 0, &gfxCtx->queue, (OSMesg)666);
+#if BENCH
+    Bench_Phase(BENCH_PHASE_RCP_WAIT);
+#endif
     osRecvMesg(&gfxCtx->queue, &msg, OS_MESG_BLOCK);
+#if BENCH
+    Bench_Phase(BENCH_PHASE_TAIL);
+#endif
     osStopTimer(&timer);
 
     if (msg == (OSMesg)666) {
@@ -260,7 +266,13 @@ void Graph_UpdateGame(GameState* gameState) {
     GameState_GetInput(gameState);
     GameState_IncrementFrameCount(gameState);
     if (R_AUDIOMGR_DEBUG_LEVEL < 3) {
+#if BENCH
+        Bench_SysEnter(BENCH_SYS_AUDIO_UPDATE);
+#endif
         Audio_Update();
+#if BENCH
+        Bench_SysExit();
+#endif
     }
 }
 
@@ -275,11 +287,11 @@ void Graph_ExecuteAndDraw(GraphicsContext* gfxCtx, GameState* gameState) {
     Graph_SetNextGfxPool(gfxCtx);
 
 #if BENCH
-    Bench_MarkGameStart(gameState);
+    Bench_Phase(BENCH_PHASE_GAME);
 #endif
     GameState_Update(gameState);
 #if BENCH
-    Bench_MarkGameEnd(gameState);
+    Bench_Phase(BENCH_PHASE_POST);
 #endif
 
     OPEN_DISPS(gfxCtx);

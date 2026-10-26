@@ -1,4 +1,7 @@
 #include "ultra64.h"
+#if BENCH
+#include "bench.h"
+#endif
 
 void osStopThread(OSThread* t) {
     register u32 saveMask = __osDisableInt();
@@ -13,7 +16,11 @@ void osStopThread(OSThread* t) {
     switch (state) {
         case OS_STATE_RUNNING:
             __osRunningThread->state = OS_STATE_STOPPED;
+#if BENCH
+            Bench_EnqueueAndYield(NULL);
+#else
             __osEnqueueAndYield(NULL);
+#endif
             break;
 
         case OS_STATE_RUNNABLE:

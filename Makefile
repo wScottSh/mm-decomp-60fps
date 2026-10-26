@@ -68,7 +68,7 @@ VENV ?= .venv
 PYTHON ?= $(VENV)/$(VENV_BIN_DIR)/python3
 # Emulator w/ flags
 N64_EMULATOR ?=
-# If BENCH is 1, build the benchmark-mode ROM into build/$(VERSION)-bench (see tools/bench/README.md)
+# If BENCH is 1, build the benchmark-mode ROM into build/$(VERSION)-bench (see tools/fps60/README.md)
 BENCH ?= 0
 
 #### Setup ####
