@@ -262,7 +262,7 @@ Adding the B1 instrumentation (about 220 lines of BENCH code in `bench.c`, `sche
 
 ## Q7 corrections
 
-[architecture.md Q7](architecture.md#q7-load-projection) now carries the measured inputs, the corrected worked numbers and the sources for each symbol. The main corrections: the projected CPU extra at 187 matrices is 1.30 ms for the graph thread and 2.23 ms with the scheduler's apply (verify-7), not 1.7 ms; RSP gfx alone is 1.07x to 1.74x over budget in the outdoor scenes measured, not 1.2x to 1.9x; RDP busy is measured and binds every Play scene.
+[architecture.md Q7](architecture.md#q7-load-projection) now carries the measured inputs, the corrected worked numbers and the sources for each symbol. The main corrections: the projected CPU extra at 187 matrices is 1.30 ms for the graph thread and 2.23 ms with the scheduler's apply (verify-7), not 1.7 ms; RSP gfx alone is over budget in sct, field and greatbay (up to 1.74x) and under it in mountain (0.96x), not 1.2x to 1.9x; RDP busy is measured and binds every Play scene.
 
 ## Backlog
 
