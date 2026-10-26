@@ -17,7 +17,7 @@ This fork of the [zeldaret/mm](https://github.com/zeldaret/mm) decompilation cha
 - The harness (`tools/fps60/`) runs six scenes deterministically and checks fidelity. Baseline: [docs/fps60/baseline.md](docs/fps60/baseline.md).
 - Retail today shows one image every 3 fields (20 fps) in every gameplay scene tested. File select lags on about a quarter of its frames.
 - Next: neutralize RDP noise in fidelity runs, measure CPU, RSP and RDP load per field, and settle the interpolation architecture. Then the per-scene budget gap decides where optimization starts.
-- Main risk: interpolation does not reduce render work, so every field needs a full render. The research estimates (inferred) that CPU time per tick must drop 2 to 4 times and that the best known RSP route saves 1.3 to 2.1 times. RDP busy time in retail is not measured yet, and it decides whether 60 fps is reachable.
+- Main risk: interpolation does not reduce render work, so every field needs a full render. The research estimates (inferred) that CPU time per tick must drop 2 to 4 times and RSP graphics time 1.3 to 2.1 times with identical output. The only route found for the RSP is optimizing MM's own microcode. RDP busy time in retail is not measured yet, and it decides whether 60 fps is reachable.
 
 ## Measure
 
