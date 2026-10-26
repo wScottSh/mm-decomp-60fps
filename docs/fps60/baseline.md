@@ -136,3 +136,48 @@ Top actors by update + draw, ms per tick (update / draw):
 - CPU per tick in Play is 12.8 to 36.3 ms at p50 (title to greatbay), against 16.7 ms per field. The graph thread's update plus draw is the largest part, and the AudioMgr thread (audio synthesis) takes 4.2 to 11.9 ms per tick.
 - `rdp_pipe` is near a full field in the busiest field of every scene, because the fork's `PIPE_BUSY` stays set until `SYNC_FULL`, while the RDP waits for the RSP too. `rdp_buf` is lower where the RDP starves (sct per tick p50 26.2 against 27.8 ms).
 - Hook cost: `hook_ms_p50` is the per-tick cost of the per-system brackets (0.007 ms in filesel to 0.200 ms in greatbay). It is inside every number above and is the same in any build that plays the same game. It is the boot-time cost of one clock read times the reads per tick, and a planted extra read per call measured the in-game cost per read at 1.0 to 1.9 times the boot-time cost (greatbay highest), so the true hook cost is up to about 0.4 ms per tick (inferred).
+
+## P2-ref corpus scenes (unit C1)
+
+Four scenes for P2-ref part a's entry criteria (`docs/fps60/architecture.md`, Q9): `pause`, `transition`, `blur` and `moving` (`tools/fps60/README.md`, Scenes). Measured on 2026-10-25 on unicron with the pinned runner.
+
+- Reference build: `make -j32 BENCH=1` at commit `98010a7d6` (branch `harness/C1`). ROM sha256 `807323e89e9a0fe9`. Runner sha256 `1f9d59f66929c5b5`.
+- Commands: `tools/fps60/run.py build/n64-us-bench/mm-n64-us.z64 --out RESULTS --check-determinism` (noise pin on, all 10 scenes), `tools/fps60/fidelity.py RESULTS/run1 RESULTS/run2`, and `tools/fps60/run.py build/n64-us-bench/mm-n64-us.z64 --out PERF --noise-pin off`.
+- Determinism: `determinism: PASS, 133 files byte-identical (host.txt, wall.tsv excluded)`. F1 of the run against itself: PASS in all 10 scenes. The perf run (pin off) completes all 10 scenes.
+- An earlier determinism run of the same build failed on one file only, `title/tmpqx6yh6h0/rom.z64` in `run2`: `run.py`'s temporary ROM directory was left behind after that scene had finished. Every measured output was identical. The cause is not known.
+
+Presentation, cadence and holds (complete images and ticks in the 600-field window; wall time in seconds, host, 4 jobs):
+
+| scene | noise pin | divisors | ticks | images | image_fields_max | lag_ticks | skipped_ticks | hold_fields | retaken_cfb_fields | settle_tick | window_start_frame | wall_s |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| pause | on | 2,3 | 232 | 232 | 25 | 5 | 2 | 29 | 1 | 22 | 132 | 54.1 |
+| transition | on | 3 | 187 | 187 | 37 | 1 | 0 | 0 | 0 | 211 | 716 | 110.2 |
+| blur | on | 3 | 194 | 194 | 4 | 13 | 0 | 0 | 0 | 22 | 132 | 69.8 |
+| moving | on | 3 | 199 | 199 | 3 | 0 | 0 | 0 | 0 | 211 | 716 | 103.0 |
+| pause | off | 2,3 | 233 | 233 | 24 | 3 | 2 | 28 | 1 | 22 | 131 | 57.5 |
+| transition | off | 3 | 187 | 187 | 37 | 1 | 0 | 0 | 0 | 211 | 713 | 111.5 |
+| blur | off | 3 | 198 | 198 | 3 | 0 | 0 | 0 | 0 | 22 | 130 | 68.3 |
+| moving | off | 3 | 198 | 198 | 3 | 0 | 0 | 0 | 0 | 211 | 713 | 105.7 |
+
+Ticks with each `BENCH_STATE_*` flag in the window (noise pin on; the pin-off run differs by at most one tick per column):
+
+| scene | capture | pause_filter | pause | page_turn | motion_blur | transition | tile | play |
+|---|---|---|---|---|---|---|---|---|
+| pause | 2 | 10 | 146 | 8 | 0 | 1 | 0 | 236 |
+| transition | 0 | 0 | 0 | 0 | 0 | 44 | 0 | 189 |
+| blur | 0 | 0 | 0 | 0 | 42 | 1 | 0 | 196 |
+| moving | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 201 |
+
+Why each scene exercises its feature:
+
+- `pause`: Start opens the menu on tick 10 after settling. The capture tick and the draw-skipped tick after it never swap (`capture` 2), the pause background filters for 10 ticks (`pause_filter`), the R press turns to the map page over 8 ticks (`page_turn`), and Start closes it. Kaleido runs at divisor 2. `hold_fields` 29 = 3 fields of the two capture ticks after tick 32, plus 19 fields of the first filter tick's image and 1 field each for the 7 filter ticks after it.
+- `transition`: Link runs back through the gate tunnel into West Clock Town. `transition` is set on 44 ticks: fade out, scene load, fade in.
+- `blur`: C-down takes off the Deku Mask. `Player_Action_86` enables priority motion blur (`motion_blur` 42 ticks), and `sMotionBlurStatus` (`z_play.c`) reads `MOTION_BLUR_PROCESS`, the state in which `Play_DrawMotionBlur` blends the previous image, on 139 of the 600 window fields (a per-field peek of that byte).
+- `moving`: the camera's view direction (`PlayState.view`, eye to at, peeked each field) turns 381 degrees net over the window, from -90 to -111 degrees after one full turn. Link crosses the gate bridge, runs along the town wall, and onto the grass (frame dumps).
+
+### Reading the new scenes
+
+- No tile transition is reachable. MM never sets `gTransitionTileState` to `TRANS_TILE_SETUP` (no writer in `src/`), so `tile` is 0 everywhere and the divisor-1 Play tick of the architecture's table does not occur in retail. `transition` is a scene change at divisor 3.
+- Two retail freezes are not holds under preferences line 24, so `hold_fields` does not count them. Closing the pause menu holds tick 178's image for 25 fields (24 with the pin off), because the first unpaused tick (179) lasts 432 ms from its start to the next tick's, with the CPU busy for 179 ms of it (pin off: 413 ms and 161 ms; `load_ticks.tsv` `wall` and `cpu_busy`). The scene change holds one image for 37 fields while the new scene loads: tick 243 lasts 532 ms with the CPU busy for 207 ms (pin off). The rest of those ticks is CPU idle, so the graph thread waits on something else, probably DMA (inferred, not traced). Under the Replay architecture no new image exists for those fields, so they fail the presentation rule unless they become a listed exception.
+- `pause` shows 1 `retaken_cfb_fields`: after the capture tick, tick 35 took the `CfbInfo` the VI still showed (see `tools/fps60/README.md`, Retail holds and tick states).
+- `blur` lags 13 ticks with the pin on and none with it off. The pin's display-list walk and `G_PM_1PRIMITIVE` add CPU and RDP time, and motion blur's full-screen blend is the heaviest RDP load in the corpus (per tick `rdp_pipe` max 45.3 ms, 2.71 fields, pin off).
