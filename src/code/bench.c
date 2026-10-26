@@ -997,7 +997,6 @@ static BenchDmaIssue* Bench_DmaFind(OSMesgQueue* queue) {
 void Bench_DmaIssued(OSMesgQueue* queue) {
     OSIntMask mask = __osDisableInt();
     BenchDmaIssue* issue = Bench_DmaFind(queue);
-
     s32 i;
 
     if (issue == NULL) {
@@ -1077,7 +1076,7 @@ void Bench_AudioSent(void) {
  */
 void Bench_AudioBarrier(void) {
     volatile s32* count = &gAudioCtx.totalTaskCount;
-    OSMesgQueue* queue = gAudioCtx.threadCmdProcQueueP;
+    volatile OSMesgQueue* queue = gAudioCtx.threadCmdProcQueueP;
     s32 last;
     s32 drained = false;
 
@@ -1090,7 +1089,7 @@ void Bench_AudioBarrier(void) {
     // An update that starts takes the queue only if totalTaskCount is a multiple of specUnk4, so the
     // queue was taken by update sent + specUnk4 at the latest, and that update has finished once the next
     // one starts. An audio reset restarts the count, so the slow path below covers it.
-    if (MQ_IS_EMPTY(queue) &&
+    if ((queue->validCount == 0) &&
         (last - (s32)sBenchAudioSentCount > (s32)gAudioCtx.audioBufferParameters.specUnk4)) {
         return;
     }
@@ -1106,6 +1105,6 @@ void Bench_AudioBarrier(void) {
             }
             last = now;
         }
-        drained = drained || MQ_IS_EMPTY(queue);
+        drained = drained || (queue->validCount == 0);
     }
 }
