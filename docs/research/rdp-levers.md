@@ -170,7 +170,7 @@ The bound charges each redundant byte the runner's measured cost for its load ty
 
 **Gain** (measured, RDP busy per tick, max / p50 ms): mountain 25.40 -> 22.90 (-2.50) / 24.80 -> 22.25 (-2.55), RSP gfx -2.59; title 26.77 -> 25.31 (-1.46) / 19.89 -> 18.29 (-1.59). sct, field and greatbay do not take the branch and move by -0.26 to +0.16 (layout). It replaces lever 1 where both apply; the two were not measured together.
 
-**F1.** See the [results table](#f1-results).
+**F1.** `fb_hash` is identical on every tick of all six scenes (measured), so the seams inference holds on the corpus. The noise-command hash differs only in title and mountain, the two scenes that take the branch, for the same harness reason as lever 1: the lever emits new `SetCombine` and `SetOtherMode` commands. The other four scenes pass F1.
 
 ### Rejected or not identical
 
@@ -187,7 +187,7 @@ The bound charges each redundant byte the runner's measured cost for its load ty
 |---|---|---|---|---|---|---|
 | lever 1, sky one cycle | fb identical, noise hash differs | fb identical, noise hash differs | fb identical, noise hash differs | fb identical, noise hash differs | fb identical, noise hash differs | fb identical, noise hash differs |
 | lever 2, seagull wing | PASS | PASS | PASS | PASS | PASS | PASS |
-| lever 5, flat sky | FLAT_TITLE | FLAT_FILESEL | FLAT_SCT | FLAT_FIELD | FLAT_MOUNTAIN | FLAT_GREATBAY |
+| lever 5, flat sky | fb identical, noise hash differs | PASS | PASS | PASS | fb identical, noise hash differs | PASS |
 
 (measured; "fb identical" = `fb_hash` equal on every tick of the window; PASS = `fb_hash` and the noise-command hash equal on every tick, 197 to 396 ticks per scene)
 
