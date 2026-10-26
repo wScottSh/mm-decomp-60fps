@@ -483,18 +483,27 @@ void Bench_EndFrame(GraphicsContext* gfxCtx, GameState* gameState) {
 }
 
 /**
- * The noise pin. The RDP's noise LFSRs step once per RDP clock (the ares fork's ares/n64/rdp/timed.hpp,
- * from Thar0/RDP-Noise console dumps), so a pixel that reads noise depends on when the RDP draws it, on a
- * console as well. Just before a gfx task is sent, Bench_PinNoise walks every display list the task
- * reaches, hashes each noise command as the game wrote it, and rewrites it to a fixed substitute:
+ * The noise pin removes the two ways RDP timing reaches pixels, so a fidelity run's image depends on the
+ * game alone:
+ *
+ *  - Noise. The RDP's noise LFSRs step once per RDP clock (the ares fork's ares/n64/rdp/timed.hpp, from
+ *    Thar0/RDP-Noise console dumps), so a pixel that reads noise depends on when the RDP draws it.
+ *  - Span buffer coherency. Without G_PM_1PRIMITIVE the RDP prefetches the next span's color and Z before
+ *    the previous primitive's write-back lands (SDK 12.2.3; the fork's RDP::prefetch in timed.cpp), so where
+ *    primitives overlap, a read sees old or new memory depending on RDRAM contention.
+ *
+ * Just before a gfx task is sent, Bench_PinNoise walks every display list the task reaches, hashes each
+ * pinned command as the game wrote it, and rewrites it:
  *
  *  - G_CD_NOISE   -> G_CD_MAGICSQ. With alpha dither PATTERN or NOTPATTERN, both read the magic square.
  *  - G_AD_NOISE   -> G_AD_PATTERN.
  *  - G_AC_DITHER  -> G_AC_THRESHOLD (blend color alpha instead of a noise threshold).
  *  - combiner RGB A = NOISE -> 1. NOISE is abc100000 in units of 1/256, so 1 is its mean.
+ *  - every write of the pipeline mode -> G_PM_1PRIMITIVE. Primitives drawn before a task's first such
+ *    write keep the mode the RSP starts with.
  *
- * These are the noise reads of the fork's RDP engine (rdp_get_dither_values, rdp_blender_alpha_reject and
- * rdp_set_suba_input_rgb in ares/n64/rdp/engine/rdp_core.c and rdp_blend.c).
+ * The noise rules are the noise reads of the fork's RDP engine (rdp_get_dither_values,
+ * rdp_blender_alpha_reject and rdp_set_suba_input_rgb in ares/n64/rdp/engine/rdp_core.c and rdp_blend.c).
  *
  * Lists in asset and static memory are rewritten in place, and the rewrite stays. A log keeps each rewritten
  * command's original words, so a later walk that meets the substitute still hashes the original. The gfx
@@ -596,9 +605,9 @@ static void Bench_UnnoiseField(u32 written, u32* bits, u32 shift, u32 noise, u32
 }
 
 /**
- * The command with each noise selection replaced by its substitute. Equal to `cmd` when it selects none.
+ * The command as the pin rewrites it. Equal to `cmd` when the pin leaves it alone.
  */
-static Gfx Bench_Unnoise(Gfx cmd) {
+static Gfx Bench_PinnedCommand(Gfx cmd) {
     u32 w0 = cmd.words.w0;
     u32 w1 = cmd.words.w1;
 
@@ -606,6 +615,9 @@ static Gfx Bench_Unnoise(Gfx cmd) {
         case G_SETOTHERMODE_H:
             Bench_UnnoiseField(Bench_OtherModeMask(w0), &w1, G_MDSFT_RGBDITHER, 2, 0);
             Bench_UnnoiseField(Bench_OtherModeMask(w0), &w1, G_MDSFT_ALPHADITHER, 2, 0);
+            if (Bench_OtherModeMask(w0) & G_PM_1PRIMITIVE) {
+                w1 |= G_PM_1PRIMITIVE;
+            }
             break;
 
         case G_SETOTHERMODE_L:
@@ -615,6 +627,7 @@ static Gfx Bench_Unnoise(Gfx cmd) {
         case G_RDPSETOTHERMODE:
             Bench_UnnoiseField(0xFFFFFF, &w0, G_MDSFT_RGBDITHER, 2, 0);
             Bench_UnnoiseField(0xFFFFFF, &w0, G_MDSFT_ALPHADITHER, 2, 0);
+            w0 |= G_PM_1PRIMITIVE;
             Bench_UnnoiseField(0xFFFFFFFF, &w1, G_MDSFT_ALPHACOMPARE, 3, 1);
             break;
 
@@ -646,7 +659,7 @@ static void Bench_NoiseCommand(BenchNoiseWalk* walk, Gfx* cmd, u32 addr) {
         orig = slot->orig;
         pinned = *cmd;
     } else {
-        pinned = Bench_Unnoise(orig);
+        pinned = Bench_PinnedCommand(orig);
         if ((pinned.words.w0 == orig.words.w0) && (pinned.words.w1 == orig.words.w1)) {
             if ((slot != NULL) && (slot->addr == addr)) {
                 // The game rewrote this command since a walk pinned it; G_NOOP never matches a later read.

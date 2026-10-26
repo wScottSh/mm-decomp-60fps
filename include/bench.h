@@ -66,9 +66,9 @@ typedef struct BenchConfig {
 extern BenchConfig gBenchConfig;
 
 /**
- * The noise pin's walk of one gfx task's display lists (Bench_PinNoise). A noise command is a
- * G_SETOTHERMODE_H/L, G_RDPSETOTHERMODE or G_SETCOMBINE that selects G_CD_NOISE, G_AD_NOISE, G_AC_DITHER
- * or the combiner's NOISE input.
+ * The noise pin's walk of one gfx task's display lists (Bench_PinNoise, src/code/bench.c). A noise command
+ * is one the pin rewrites: a G_SETOTHERMODE_H/L, G_RDPSETOTHERMODE or G_SETCOMBINE that selects G_CD_NOISE,
+ * G_AD_NOISE, G_AC_DITHER or the combiner's NOISE input, or that writes the pipeline mode.
  */
 typedef struct BenchNoiseRecord {
     u32 hash;     // FNV-1a over both words of every noise command as the game wrote it, in walk order
