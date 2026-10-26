@@ -32,6 +32,8 @@ make -j32 BENCH=1                                  # build/n64-us-bench/mm-n64-u
 tools/fps60/run.py build/n64-us-bench/mm-n64-us.z64 --out RESULTS                  # fidelity: noise pin on
 tools/fps60/run.py build/n64-us-bench/mm-n64-us.z64 --out RESULTS --noise-pin off  # load: retail rendering
 tools/fps60/fidelity.py BASE_RESULTS RESULTS       # F1: keyframes against the reference
+tools/fps60/golden.py check RESULTS                # F2: every image against the golden set (interpolating builds)
+tools/fps60/stale_reads.py BASE CAND CONTROL       # stale-read exposure, runs made with --noise-pin noise-only
 ```
 
 See [tools/fps60/README.md](tools/fps60/README.md).
