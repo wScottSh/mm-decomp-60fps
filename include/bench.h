@@ -22,6 +22,11 @@ struct GraphicsContext;
 
 #define BENCH_MAX_INPUTS 512
 
+// BenchConfig.noisePin
+#define BENCH_NOISE_PIN_OFF 0   // retail rendering (perf runs)
+#define BENCH_NOISE_PIN_ON 1    // Bench_PinNoise takes RDP timing out of every gfx task's pixels (fidelity runs)
+#define BENCH_NOISE_PIN_CHECK 2 // as ON, and every task is walked a second time to check the walk is idempotent
+
 // BenchConfig.flags
 #define BENCH_FLAG_PIN_EFFECT_BUDGET (1 << 1) // func_80173B48 returns its no-lag value
 
@@ -49,6 +54,7 @@ typedef struct BenchConfig {
     u32 retraceTicks; // the gIrqMgrRetraceTime that the pinned effect budget uses
     u32 inputCount;   // clamped to BENCH_MAX_INPUTS
     BenchInput inputs[BENCH_MAX_INPUTS];
+    u32 noisePin;     // BENCH_NOISE_PIN_*
 } BenchConfig;
 
 extern BenchConfig gBenchConfig;
@@ -154,6 +160,31 @@ typedef struct BenchTick {
 #define BENCH_TICK_RING 640
 
 /**
+ * The noise pin's walk of one gfx task's display lists (Bench_PinNoise, src/code/bench.c). A noise command
+ * is one that writes a field the pin rewrites, whatever value it writes: every G_RDPSETOTHERMODE and
+ * G_SETCOMBINE, a G_SETOTHERMODE_H that covers the color dither, alpha dither or pipeline mode bits, and a
+ * G_SETOTHERMODE_L that covers the alpha compare bits.
+ */
+typedef struct BenchNoiseRecord {
+    u32 hash;     // FNV-1a over both words of every noise command as the game wrote it, in walk order
+    u32 commands; // noise commands the walk met
+    u32 patched;  // of those, the ones this walk rewrote; the others an earlier walk rewrote
+    u32 visited;  // display-list commands the walk visited
+} BenchNoiseRecord;
+
+// Since boot, over every walk
+typedef struct BenchNoiseTotals {
+    u32 walks;
+    u32 visited;
+    u32 commands;
+    u32 patched;
+    u32 unresolved; // G_DL, G_BRANCH_Z targets outside RDRAM or in a segment that was never set
+    u32 unknown;    // opcodes the walker cannot follow, and noise fields a partial othermode write leaves undecided
+    u32 overflow;   // walks cut short by the call stack or the visit cap, and patches the log had no room for
+    u32 mismatch;   // BENCH_NOISE_PIN_CHECK: second walks whose record differs from the first's or that patched
+} BenchNoiseTotals;
+
+/**
  * What the fps60 harness reads between VI fields (tools/fps60/README.md). The layout is the harness
  * contract: run.py reads these words by offset from the map address of gBenchProbe.
  */
@@ -174,6 +205,8 @@ typedef struct BenchProbe {
     /* 0x3C */ u32 layout;      // sizeof(BenchField) << 24 | BENCH_FIELD_RING << 20 | sizeof(BenchTick) << 10 | BENCH_TICK_RING
     /* 0x40 */ u32 actorIds;    // ACTOR_ID_MAX
     /* 0x44 */ u32 clockReadCost; // PClocks per Bench_CpuNow call, timed at boot
+    /* 0x48 */ BenchNoiseRecord cfbNoise[3]; // that tick's noise-pin walk, zero with the pin off
+    /* 0x78 */ BenchNoiseTotals noise;
 } BenchProbe;
 
 extern BenchProbe gBenchProbe;
@@ -182,6 +215,7 @@ s32 Bench_Boot(struct GameState* gameState);
 void Bench_BeginFrame(struct GameState* gameState);
 void Bench_EndFrame(struct GraphicsContext* gfxCtx, struct GameState* gameState);
 void Bench_TagCfb(CfbInfo* cfb);
+void Bench_PinNoise(CfbInfo* cfb, Gfx* taskList);
 void Bench_ApplyInput(struct GameState* gameState);
 
 u32 Bench_CpuNow(void);

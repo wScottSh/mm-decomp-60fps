@@ -9,6 +9,7 @@ tools/fps60/worktree-setup.sh UNIT BRANCH [BASE_REF]   # prints ~/repos/mm-wt/UN
 make -j32 BENCH=1                                       # build/n64-us-bench/mm-n64-us.z64 and .map
 tools/fps60/run.py build/n64-us-bench/mm-n64-us.z64 --out RESULTS
 tools/fps60/run.py build/n64-us-bench/mm-n64-us.z64 --out RESULTS --check-determinism
+tools/fps60/run.py build/n64-us-bench/mm-n64-us.z64 --out RESULTS --noise-pin off   # perf runs: retail RDP noise
 tools/fps60/fidelity.py BASE_RESULTS CAND_RESULTS
 ```
 
@@ -16,6 +17,7 @@ tools/fps60/fidelity.py BASE_RESULTS CAND_RESULTS
 - `run.py` reads symbols from the map beside the ROM (`--map` overrides). It checks that the runner's sha256 starts with `1f9d59f6` (set `FPS60_ANY_RUNNER=1` only for experiments). It runs at most 4 runner processes (`--jobs`, preferences line 14), and `--scenes title,sct` selects scenes.
 - A full corpus run took 149 s of wall time with 4 jobs, and each scene took 41 to 102 s (measured on unicron, see `docs/fps60/baseline.md`).
 - `run.py --check-determinism` runs the corpus into `RESULTS/run1` and `RESULTS/run2` and fails unless every file except `wall.tsv` and `host.txt` is byte-identical.
+- `run.py --noise-pin on|off|check` sets the noise pin (see Noise pin below). The default is `on`, for fidelity runs. Perf runs use `off`. `check` is `on` plus a second walk of every gfx task, which must give the same record and patch nothing. With the pin on, `run.py` fails a scene whose walk met an unresolved target, an unknown opcode, an overflow or a check mismatch, and prints the totals.
 - `fidelity.py` exits 0 only when every scene passes. On a failure it runs that scene again from both ROMs, dumps both frames, and writes the ares `framediff.py` report under `CAND_RESULTS/fidelity/<scene>/`. The ROM that a result directory names in `meta.json` must still have the recorded sha256.
 
 `run.py` fails loudly when the runner exits nonzero, the stop reason is not `script-stop`, the ROM boots a scene other than the one asked for, the window mark is missing, a peek is missing or unreadable, the stats file is short, or the VI origin does not belong to the framebuffer that the harness attributes to it. It prints the fields, images, and ticks it measured per scene and in total.
@@ -56,9 +58,9 @@ A retail-architecture build presents one image per logic tick, so every image is
 | `summary.tsv` | One row per scene: the columns of `summary.json` below, flattened. |
 | `wall.tsv` | Host wall time per scene and in total, the job count, and the 1-minute load average before and after each scene. Not deterministic. |
 | `<scene>/fields.tsv` | One row per window field. Columns are listed below. |
-| `<scene>/keyframes.tsv` | The per-tick image sequence: one row per complete keyframe image, with `image_tick`, `first_field`, `fields` shown, `final_frame` (stats row of its last field), `fb_hash` at its last field, and `hash_changes` (times `fb_hash` changed while it was shown, 0 when the framebuffer was not written while displayed). |
+| `<scene>/keyframes.tsv` | The per-tick image sequence: one row per complete keyframe image, with `image_tick`, `first_field`, `fields` shown, `final_frame` (stats row of its last field), `fb_hash` at its last field, and `hash_changes` (times `fb_hash` changed while it was shown, 0 when the framebuffer was not written while displayed). With the noise pin on, also that tick's walk: `noise_hash`, `noise_cmds`, `noise_patched` and `dl_cmds` (`BenchNoiseRecord`). |
 | `<scene>/ticks.tsv` | One row per complete tick: `tick`, `first_field` its first image appears, `fields` until the next tick's first image, `divisor`, and `skipped_after` (ticks after it that never appeared). |
-| `<scene>/summary.json` | `fields`, `images`, `fields_per_image` (counts at 1 to 5 and 6 or more), `image_share_at_1`, `image_fields_max`, `ticks`, `fields_per_tick`, `lag_ticks`, `skipped_ticks`, `tick_fields_max`, `divisors`, `keyframes`, `first_tick`, `last_tick`, `window_start_frame`, `settle_tick`, `retrace_ticks`. |
+| `<scene>/summary.json` | `noise_pin`, and with the pin on `noise_totals` (`BenchNoiseTotals` after the window), `noise_cmds_per_keyframe_max` and `noise_patched_in_window`. `fields`, `images`, `fields_per_image` (counts at 1 to 5 and 6 or more), `image_share_at_1`, `image_fields_max`, `ticks`, `fields_per_tick`, `lag_ticks`, `skipped_ticks`, `tick_fields_max`, `divisors`, `keyframes`, `first_tick`, `last_tick`, `window_start_frame`, `settle_tick`, `retrace_ticks`. |
 | `<scene>/stats.tsv` | The runner's per-field stats for the whole run (the runner's README, Per-field stats). |
 | `<scene>/script.txt`, `events.txt` | The generated runner script, and its mark and peek lines. |
 | `<scene>/guest.txt` | The ROM's IS-Viewer output (the `BENCH START` line). |
@@ -86,11 +88,11 @@ A retail-architecture build presents one image per logic tick, so every image is
 - **Fields per displayed image.** A complete image is a run of fields between two `VI_ORIGIN` changes inside the window. The partial images at the window edges are left out. The pass rule is that every image lasts 1 field (`image_share_at_1` = 1).
 - **Fields per logic tick.** A tick's length is the number of fields from the first field showing any of its images to the first field showing the next tick's image. This is VI-locked, unlike the start time of `Graph_Update`, which moves with CPU and RDP time inside a field. The first and last tick in the window are left out. A **lag tick** lasts longer than the divisor at its first field. A **skipped tick** never appears. Its time counts toward the tick before it.
 - **Load.** See Load metrics below.
-- **F1.** `fidelity.py` takes each scene's keyframes by `image_tick`, over the tick range both windows cover. A tick passes when both sides have a keyframe for it and the two `fb_hash` values are equal. The output is pass or fail, the first differing tick, and the number of differing ticks.
+- **F1.** `fidelity.py` takes each scene's keyframes by `image_tick`, over the tick range both windows cover. A tick passes when both sides have a keyframe for it, the two `fb_hash` values are equal, and, with the noise pin on, the two `noise_hash` values are equal. Both runs must have the same noise pin setting. The output is pass or fail, the first differing tick and which hash differs there, and the number of differing ticks for each hash.
 
 ## Load metrics
 
-The load counters are always on in a `BENCH` build and cost nothing to read: the runner peeks RAM between fields without touching emulated timing. Perf runs use them. Units in the TSVs: CPU times are PClocks (93.75 MHz), RSP times are the runner's 750 MHz units (`XPROFREAD 0x0200`), RDP counters are RCP clocks (62.5 MHz). The summaries convert to ms. A share is ms divided by the median runner field (`stats.tsv` `cpu_cycles` per field, 16.715 ms measured).
+The load counters are always on in a `BENCH` build and cost nothing to read: the runner peeks RAM between fields without touching emulated timing. Perf runs use them, with `--noise-pin off`: with the pin on, the load includes the pin's walk on the graph thread and the RDP time that `G_PM_1PRIMITIVE` adds, which retail does not have. Units in the TSVs: CPU times are PClocks (93.75 MHz), RSP times are the runner's 750 MHz units (`XPROFREAD 0x0200`), RDP counters are RCP clocks (62.5 MHz). The summaries convert to ms. A share is ms divided by the median runner field (`stats.tsv` `cpu_cycles` per field, 16.715 ms measured).
 
 ### CPU time per thread
 
@@ -157,16 +159,56 @@ Paths that feed timing into game logic and are not pinned. Each one is outside t
 | `src/code/z_sram_NES.c:1925-1978` | Flash save writes wait for 2 s of `osGetTime()`. | No save in the windows. |
 | `src/audio/lib/thread.c:156`, `967` | `osGetCount()` seeds audio randomness. | Audio only. Not visible. |
 | `src/code/speed_meter.c:122-128` | Draws `gRSPGfxTimeTotal`, `gRDPTimeTotal` and `gGraphUpdatePeriod`. | Only when `R_ENABLE_ARENA_DBG` is nonzero (`game.c:115`). 0 in the corpus. |
-| RDP noise (hardware, no source line) | The noise LFSRs step once per RDP clock (the fork's `ares/n64/rdp/timed.hpp`, from Thar0/RDP-Noise console dumps). Dithered pixels (alpha dither, color dither, the combiner's NOISE input) depend on when the RDP draws them. | Every scene except `filesel`. A change that moves RDP timing changes those pixels by one 5-bit step while the game stays identical, so F1 fails (see `docs/fps60/baseline.md`). |
+| RDP noise (hardware, no source line) | The noise LFSRs step once per RDP clock (the fork's `ares/n64/rdp/timed.hpp`, from Thar0/RDP-Noise console dumps). Dithered pixels (alpha dither, color dither, the combiner's NOISE input) depend on when the RDP draws them. | Every scene except `filesel`. With the noise pin off, a change that moves RDP timing changes those pixels by one 5-bit step while the game stays identical, so F1 fails (see `docs/fps60/baseline.md`). The noise pin removes this path for fidelity runs. |
 | `src/code/sched.c:245, 427`, `src/code/graph.c:159` | Frame pacing itself: swaps, retraces, and the 3 s RCP hang timeout. | This is what the harness measures, not a confound. |
 | `src/code/z_nmi_buff.c:32`, `src/boot/libc64/__osMalloc.c:37`, `src/boot/fault.c:553` | Reset time, allocation debug stamps, the crash screen. | Not read by game logic. |
 
 `BENCH` also changes the boot (`Bench_BootPlay` and `Bench_BootFileSelect` in `bench.c` take shortcuts that the console logo, title and file select would otherwise take), adds RAM (the probe, the 4 KiB input table, the load rings: 111 KiB of bss, against 73 KiB for the per-frame record buffer they replace), and adds the load hooks' CPU time (see Load metrics). Base and candidate share these. `tools/fps60/memmap.py ELF...` prints the static RAM layout of builds side by side.
 
+## Noise pin
+
+Preferences line 20: retail never shows the same noise-dithered pixels twice, so noise patterns are not part of retail's image. Fidelity runs neutralize noise identically in reference and candidate, and F1 also compares how the game used noise.
+
+The pin also removes a second path from RDP timing to pixels: span buffer coherency. Without `G_PM_1PRIMITIVE`, the RDP prefetches the next span's color and Z before the previous primitive's write-back lands (SDK 12.2.3; the fork models it in `RDP::prefetch`, `ares/n64/rdp/timed.cpp`). Where primitives overlap and read memory (`IM_RD` or `Z_CMP`), the read sees old or new memory depending on RDRAM contention from the CPU, RSP, VI and AI. With noise pinned and the game state identical at every tick (actor positions, rotations, scales and camera, checked by a throwaway per-tick hash), a dead-code build still differed from the reference by single edge pixels in `sct` (25 ticks) and `field` (1 tick). Forcing `G_PM_1PRIMITIVE` removed every one (H1c report). The fork's spec lists `rdp.read-gate` as fail and `hw:stale-read` as pending, so this path is modeled but not yet checked against a console.
+
+`BenchConfig.noisePin` (`include/bench.h`, `BENCH_NOISE_PIN_*`) selects it. The ROM's default is off, so a run that does not set it renders as retail. `run.py` patches it per run.
+
+What it does. `Bench_PinNoise` (`src/code/bench.c`, called from `Graph_TaskSet00` in `graph.c` after the previous gfx task finished and before the task is sent) walks every display-list command the task reaches, in RSP order:
+
+- `G_DL` calls and branches, `G_ENDDL`, the segment table (`G_MOVEWORD G_MW_SEGMENT`), and `G_LOAD_UCODE` switches between F3DZEX2 and S2DEX2. `G_BRANCH_Z` and `G_CULLDL` depend on vertex depth, so the walk takes both paths of a `G_BRANCH_Z` and never culls. A target outside RDRAM or in a segment that was never set counts as `unresolved`. An opcode the active microcode does not define, and S2DEX2's `G_SELECT_DL`, count as `unknown`.
+- A noise command (the name covers both paths) is a command that writes a field the pin rewrites, whatever value it writes. That is every `G_RDPSETOTHERMODE` and every `G_SETCOMBINE`, a `G_SETOTHERMODE_H` whose bits cover the color dither (`G_MDSFT_RGBDITHER`), alpha dither (`G_MDSFT_ALPHADITHER`) or pipeline mode (`G_MDSFT_PIPELINE`) bits, and a `G_SETOTHERMODE_L` whose bits cover the alpha compare bits (`G_MDSFT_ALPHACOMPARE`). A noise command that selects one of the noise reads of the fork's RDP engine (`ares/n64/rdp/engine/rdp_core.c`, `rdp_blend.c`), or writes `G_PM_NPRIMITIVE`, is rewritten in RDRAM to a fixed substitute:
+
+| Noise read | Substitute | Why this one |
+|---|---|---|
+| `G_CD_NOISE` (RGB dither) | `G_CD_MAGICSQ` | Alpha dither `PATTERN` and `NOTPATTERN` read the magic square under both, so alpha is unchanged. |
+| `G_AD_NOISE` (alpha dither) | `G_AD_PATTERN` | Ordered, and the same mean dither. |
+| `G_AC_DITHER` (alpha compare against a noise threshold) | `G_AC_THRESHOLD` | Keeps the compare, against the blend color's alpha. |
+| combiner RGB input A = `NOISE`, either cycle | `G_CCMUX_1` | `NOISE` is abc100000 in 1/256 units; its mean is 1. |
+| pipeline mode (`G_PM_NPRIMITIVE` or `G_PM_1PRIMITIVE`) | `G_PM_1PRIMITIVE` | Each primitive waits for the previous one's write-back, so no read is stale. Primitives drawn before a task's first pipeline-mode write keep the RSP's starting mode. |
+
+- The per-tick record (`BenchProbe.cfbNoise[i]`, parallel to `cfbTick[i]`) holds `noise_hash`, FNV-1a over both words of every noise command the walk met, rewritten or not, as the game wrote it, in walk order. It also holds `noise_cmds`, the number of noise commands; `noise_patched`, how many of them this walk rewrote; and `dl_cmds`, every command visited. Only `noise_hash` takes part in F1. No other command is hashed: a `G_SETOTHERMODE_H/L` that covers none of the bits above (texture filter, render mode and the like) only counts toward `dl_cmds`, and its effect on the image shows in `fb_hash`. `run.py` reads the record of the displayed `CfbInfo` each field, like `cfbTick`.
+- Idempotent. Display lists in asset, object and static memory are rewritten in place, and the rewrite stays. A log (`sBenchNoiseStatic`) keeps each rewritten command's address, original and substitute. A later walk that finds the substitute at that address hashes the original. If the game has rewritten the command since, the walk treats it as new. The gfx pools are rebuilt every frame, so their log (`sBenchNoisePool`) is cleared at each walk. `--noise-pin check` proves the property on a run: every task is walked twice, and the second walk must hash the same and patch nothing (`mismatch` 0).
+
+What it detects. With the pin on, a tick fails F1 when its image differs anywhere (pixels outside noise, and the substitutes' deterministic dither) or when the game emitted different noise commands: a noise mode added, removed or changed (for example `G_CD_MAGICSQ` written where retail writes `G_CD_NOISE`), a changed combiner that reads or stops reading `NOISE`, a changed pipeline mode, or the same commands in a different order or count. A noise command is hashed whether or not the pin rewrites it, so a change that adds, drops or reorders one also fails, even when it already holds the substitute's value and the image could not show it (for example an extra `G_PM_1PRIMITIVE` write, or an extra `G_CD_MAGICSQ` write where the game writes no dither; H1c-fix report).
+
+What it cannot detect.
+
+- The noise patterns themselves, and which overlapping pixels read stale memory. A change that only moves RDP timing passes, which is the point (line 20).
+- Edge pixels where retail would read stale memory: the pin always draws them as 1PRIMITIVE does.
+- Pixels in noise-dithered draws that differ only by the dither the substitute replaced. The substitute draws them with a fixed dither, so a change in the colors, geometry or textures of a noise draw still shows. But a difference that retail's noise would have hidden or shown at random shows here as the substitute renders it.
+- A command at an address that the walk patched earlier, which the game later overwrites with exactly the substitute's words. The walk then hashes the old original. Reference and candidate do the same, so F1 only misses a candidate that changes this alone. Gfx-pool addresses are immune, because their log lives for one walk.
+- A rewritten command that the game reads back as data and copies elsewhere. The copy then holds the substitute and is not a noise command. No such read is known in the corpus.
+- Noise commands in display lists that no gfx task reaches, and noise in a task other than `Graph_TaskSet00`'s (MM sends no other gfx task).
+- Partial othermode writes that cover half of a 2-bit dither or compare field count as `unknown`, and fail the run, because their result depends on state before.
+
+Cost. The walk visits about 11,500 commands per tick in `sct` (measured, see the H1c report) on the CPU before the task is sent, and 1PRIMITIVE adds RDP time per primitive. Both change timing, but with the pin on timing no longer reaches the image. File select, which already lags in retail, shows fewer ticks in its window with the pin on. Perf runs use `--noise-pin off`, where `Bench_PinNoise` returns at once.
+
+Pin off is retail rendering, not H1a's bytes. Any code or data layout change moves CPU timing and so the RDP clock at each pixel, so a pin-off run of this tree does not reproduce H1a's `fb_hash` values even though the pin-off path only returns (H1c report).
+
 ## Gotchas
 
-- The harness reads `gBenchProbe` by offset (`run.py`, `PROBE_*`). A change to `BenchProbe` or `BenchConfig` in `include/bench.h` is a harness change. `run.py` checks the probe's magic and the config's magic, not the layout.
+- The harness reads `gBenchProbe` by offset (`run.py`, `PROBE_*`, `CFG_NOISE_PIN`). A change to `BenchProbe` or `BenchConfig` in `include/bench.h` is a harness change. `run.py` checks the probe's magic and the config's magic, not the layout.
 - `run.py` never clears `BENCH_FLAG_PIN_EFFECT_BUDGET`. The ROM never exits on its own: the runner script stops it.
 - `title` settles 127 ticks after boot. The Play scenes with an entrance cutscene (`field`, `greatbay`) settle about 200 ticks after boot. Their runs take longer for that reason.
 - The first image of a window often belongs to a tick before `settleTick`, because the image the VI shows lags the latest tick by about two ticks.
-- F1 is sensitive to RDP timing through the noise generator (see the table above). A planted change that draws one pixel on tick 100 of `sct` fails F1 in `sct` only when it is compared with a build of the same layout. Its first differing tick is 99, because the extra CPU work during tick 100 moves the RDP's render of tick 99 and so its noise. Compared with the reference, the same build fails in 5 scenes, each within its first 12 compared ticks. The H1a report has the patches and numbers.
+- With the noise pin off, F1 is sensitive to RDP timing through the noise generator (see the table above). A planted change that draws one pixel on tick 100 of `sct` fails F1 in `sct` only when it is compared with a build of the same layout. Its first differing tick is 99, because the extra CPU work during tick 100 moves the RDP's render of tick 99 and so its noise. Compared with the reference, the same build fails in 5 scenes, each within its first 12 compared ticks. The H1a report has the patches and numbers.
