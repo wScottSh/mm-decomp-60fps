@@ -1012,6 +1012,8 @@ void Bench_PinNoise(CfbInfo* cfb, Gfx* taskList) {
  * the audio thread derives from its commands, so the tick at which logic sees a load finish depends on DMA,
  * audio and CPU timing (docs/fps60/architecture.md, risk R4). With the pin set, both depend only on ticks:
  *
+ *  - A DMA request the graph thread issues has landed when DmaMgr_RequestAsync returns, so no transfer
+ *    writes memory while logic or drawing reads it (player animation frames are read before their wait).
  *  - A DMA request issued during tick t is "not done" to the first poll of its queue in tick t and "done" to
  *    every later poll, which waits for the transfer. A second poll in tick t is a wait loop (Play_Init spins on
  *    Room_ProcessRoomRequest), which retail also leaves only once the transfer is done.
@@ -1030,6 +1032,7 @@ typedef struct BenchDmaIssue {
 } BenchDmaIssue;
 
 static BenchDmaIssue sBenchDmaIssues[BENCH_DMA_ISSUES];
+static volatile u32 sBenchDmaToLand = 0; // graph-thread requests sent and not yet landed
 static u32 sBenchAudioSentCount;
 static s32 sBenchAudioSent = false;
 
@@ -1045,11 +1048,13 @@ static BenchDmaIssue* Bench_DmaFind(OSMesgQueue* queue) {
 }
 
 /**
- * DmaMgr_RequestAsync, from any thread, once Bench_Boot has run.
+ * DmaMgr_RequestAsync, from any thread, once Bench_Boot has run. Returns true when the request must land
+ * before DmaMgr_RequestAsync returns (Bench_DmaLand).
  */
-void Bench_DmaIssued(OSMesgQueue* queue) {
+s32 Bench_DmaIssued(OSMesgQueue* queue) {
     OSIntMask mask = __osDisableInt();
     BenchDmaIssue* issue = Bench_DmaFind(queue);
+    s32 land;
     s32 i;
 
     if (issue == NULL) {
@@ -1071,7 +1076,30 @@ void Bench_DmaIssued(OSMesgQueue* queue) {
     issue->queue = queue;
     issue->tick = gBenchProbe.tick;
     issue->polled = false;
+    land = (gBenchConfig.flags & BENCH_FLAG_PIN_LOADS) && (osGetThreadId(NULL) == Z_THREAD_ID_GRAPH);
+    if (land) {
+        sBenchDmaToLand++;
+    }
     __osRestoreInt(mask);
+    return land;
+}
+
+/**
+ * The DMA manager thread, after the transfer of a request Bench_DmaIssued marked.
+ */
+void Bench_DmaLanded(void) {
+    sBenchDmaToLand--;
+}
+
+/**
+ * DmaMgr_RequestAsync on the graph thread (priority 9), after sending a marked request: waits for the DMA
+ * manager (priority 17), which preempts this loop whenever it can run, to land every marked request.
+ */
+void Bench_DmaLand(void) {
+    if (sBenchDmaToLand != 0) {
+        gBenchProbe.load.dmaLandWaits++;
+        while (sBenchDmaToLand != 0) {}
+    }
 }
 
 /**

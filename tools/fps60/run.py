@@ -56,7 +56,7 @@ NOISE_PIN = {"off": 0, "on": 1, "check": 2, "noise-only": 3}  # BENCH_NOISE_PIN_
 LOAD_PIN_SYMBOL = "Bench_DmaRecv"
 PROBE_LOAD_TOTALS = 0x9C
 LOAD_TOTALS = ["dma_polls", "dma_held", "dma_waited", "dma_untracked", "dma_overflow", "audio_barriers",
-               "audio_waits"]
+               "audio_waits", "dma_land_waits"]
 LOAD_MUST_BE_ZERO = ["dma_untracked", "dma_overflow"]
 
 # BenchProbe.tickState: a ring of BENCH_STATE_RING words, (tick << 12) | (divisor << 8) | BENCH_STATE_* flags,

@@ -244,6 +244,11 @@ void DmaMgr_ThreadEntry(void* arg) {
         req = (DmaRequest*)msg;
 
         DmaMgr_ProcessRequest(req);
+#if BENCH
+        if (req->unk14) {
+            Bench_DmaLanded();
+        }
+#endif
 
         // Notify the sender that the request has been processed
         if (req->notifyQueue != NULL) {
@@ -283,11 +288,16 @@ s32 DmaMgr_RequestAsync(DmaRequest* req, void* ram, uintptr_t vrom, size_t size,
 #if BENCH
     // bench.c is in code, which this function loads; Bench_Boot enables the clock after that.
     if (gBenchCpuClock.enabled) {
-        Bench_DmaIssued(queue);
+        req->unk14 = Bench_DmaIssued(queue);
     }
 #endif
 
     osSendMesg(&sDmaMgrMsgQueue, (OSMesg)req, OS_MESG_BLOCK);
+#if BENCH
+    if (req->unk14) {
+        Bench_DmaLand();
+    }
+#endif
 
     return 0;
 }

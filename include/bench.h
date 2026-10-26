@@ -214,6 +214,7 @@ typedef struct BenchLoadTotals {
     u32 dmaOverflow;  // records of this tick's requests that the full issue table dropped
     u32 audioBarriers; // ticks that checked the audio thread had applied the previous tick's commands
     u32 audioWaits;    // of those, the ones that had to wait
+    u32 dmaLandWaits;  // graph-thread requests whose transfer had not landed when the DMA manager returned
 } BenchLoadTotals;
 
 /**
@@ -260,7 +261,9 @@ void Bench_EndFrame(struct GraphicsContext* gfxCtx, struct GameState* gameState)
 void Bench_TagCfb(CfbInfo* cfb);
 void Bench_PinNoise(CfbInfo* cfb, Gfx* taskList);
 void Bench_ApplyInput(struct GameState* gameState);
-void Bench_DmaIssued(OSMesgQueue* queue);
+s32 Bench_DmaIssued(OSMesgQueue* queue);
+void Bench_DmaLand(void);
+void Bench_DmaLanded(void);
 void Bench_DmaDone(OSMesgQueue* queue);
 s32 Bench_DmaRecv(OSMesgQueue* queue, s32 flag);
 void Bench_AudioBarrier(void);
