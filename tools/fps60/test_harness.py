@@ -13,6 +13,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import fidelity  # noqa: E402
 import golden  # noqa: E402
+import reference  # noqa: E402
 import stale_reads  # noqa: E402
 
 TICKS = range(10, 30)
@@ -150,6 +151,19 @@ class Harness(unittest.TestCase):
         a.write_bytes(b"P6\n2 2\n255\n" + bytes(12))
         b.write_bytes(b"P6\n2 2\n255\n" + bytes([0, 0, 0, 9, 0, 0, 0, 0, 0, 0, 0, 1]))
         self.assertEqual(stale_reads.differing_pixels(a, b), 2)
+
+
+    def test_reference_views_split_bench_hooks_from_game_code(self):
+        retail = "#include \"a.h\"\nvoid f(void) {\n    g();\n}\n"
+        hooked = ("#include \"a.h\"\n#if BENCH\n#include \"bench.h\"\n#endif\nvoid f(void) {\n#if BENCH\n"
+                  "    Bench_G();\n#else\n    g();\n#endif\n}\n")
+        game_change = "#include \"a.h\"\nvoid f(void) {\n    h();\n}\n"
+        self.assertEqual(reference.views(retail)[0], reference.views(hooked)[0])
+        self.assertNotEqual(reference.views(retail)[1], reference.views(hooked)[1])
+        self.assertNotEqual(reference.views(retail)[0], reference.views(game_change)[0])
+        self.assertEqual(reference.views(retail)[1], reference.views(game_change)[1])
+        nested = "#if BENCH\n#if DEBUG\n    x();\n#endif\n#endif\n    y();\n"
+        self.assertEqual(reference.views(nested)[0], ["    y();"])
 
 
 if __name__ == "__main__":
