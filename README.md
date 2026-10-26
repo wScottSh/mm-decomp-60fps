@@ -11,7 +11,7 @@ This fork of the [zeldaret/mm](https://github.com/zeldaret/mm) decompilation cha
 
 ## Status
 
-**Phase: budget measured, optimization next.** No retail game code has changed yet. The only source changes are benchmark hooks behind `BENCH=1`.
+**Phase: optimization.** Retail game code changes only where a measured unit proved it keeps every image identical. Benchmark hooks stay behind `BENCH=1`.
 
 - Research is done: [frame pipeline and interpolation hazards](docs/research/mm-frame-pipeline.md) and [60 fps techniques](docs/research/fps60-techniques.md).
 - The architecture is chosen: [docs/fps60/architecture.md](docs/fps60/architecture.md). Game logic and drawing run once per tick, unchanged. The RCP then renders that tick's display list once per field: the in-between images use matrices blended between the previous and current tick, and the last image uses retail's exact bytes. It needs two more framebuffers, about 316 KiB in total (inferred).
@@ -21,7 +21,8 @@ This fork of the [zeldaret/mm](https://github.com/zeldaret/mm) decompilation cha
 - The budget is measured: [docs/fps60/budget.md](docs/fps60/budget.md). Under the chosen architecture the CPU already fits its per-tick deadline in every gameplay scene, with almost no margin in South Clock Town (0.98 of the budget at worst). The RDP (the pixel processor) is the bottleneck everywhere: each image needs 1.6 to 2.1 times its 15 ms budget, and RSP start to RDP finish takes 1.7 to 2.6 times it (measured, worst tick). The RSP is over budget in four of the five gameplay scenes (all but the title), partly because it waits on the RDP.
 - The time goes mostly to drawing the rooms' opaque geometry (about 45% of RDP time outdoors), the actors, the sky and the HUD, and the cost is mostly overhead per triangle and per texture load, not pixels (inferred from measured clocks per pixel against the hardware rate). A lower bound on RDP work that keeps every pixel identical is 0.53 to 0.76 of the budget, so no scene is ruled out by fill alone (inferred). Mountain Village is the tightest.
 - The noise pin is in: fidelity runs neutralize RDP noise and stale span-buffer reads identically in both builds, and hash every noise-related and pipeline-mode command as the game emitted it, so a build that changes those commands still fails. With the pin on, a build that only adds dead code passes F1 in all six scenes. A one-pixel change fails at exactly its tick, and so does one added, dropped or changed noise or pipeline-mode command (measured).
-- Next: optimization units, one hypothesis each, from the ranked backlog, and the interpolation reference implementation.
+- First CPU optimization: the two matrix functions every skeleton limb calls (`Matrix_TranslateRotateZYX`, `Matrix_MtxFToMtx`) run as loops instead of unrolled code, with the same float operations in the same order. They miss the instruction cache less, so the graph thread spends 0.5 ms less per tick in Great Bay and about 0.3 ms less in South Clock Town, against a control build with the same cache layout (measured). Every matrix is bit-identical to retail (measured over 276,608 in-ROM test cases), and F1 passes in all six scenes.
+- Next: more optimization units, one hypothesis each, from the ranked backlog, and the interpolation reference implementation.
 - Main risk: interpolation does not reduce render work, so every field needs a full render. Reaching 60 fps means cutting each image's RDP time about 2 times with identical pixels, mostly by removing per-triangle, texture-load and memory overhead.
 
 ## Measure

@@ -1000,10 +1000,9 @@ void Matrix_TranslateRotateZYX(Vec3f* translation, Vec3s* rot) {
     f32 temp2;
     f32* row;
 
-    // One loop body per row instead of four copies: the same float operations in the same order, in a quarter of the
-    // code, so each limb's call misses the instruction cache fewer times (VR4300 UM ch. 11, 16 KiB I-cache).
-    // row[0], row[4], row[8], row[12] are the row's x, y, z, w columns (xx, xy, xz, xw for the first row).
-    // No check for z != 0, presumably since translation is interleaved.
+    // Looped rather than unrolled: retail's float operations in retail's order in half the code, so a limb's call
+    // misses the VR4300 instruction cache less (VR4300 UM ch. 11). row[0], row[4], row[8], row[12] are one row's
+    // x, y, z, w columns. No check for z != 0, presumably since translation is interleaved.
     for (row = &cmf->xx; row != &cmf->xy; row++) {
         temp1 = row[0];
         temp2 = row[4];
@@ -1123,8 +1122,8 @@ Mtx* Matrix_MtxFToMtx(MtxF* src, Mtx* dest) {
     u16* intPart = (u16*)&dest->m[0][0];
     f32* elem;
 
-    // A loop rather than 16 unrolled copies, for the instruction cache as in Matrix_TranslateRotateZYX.
-    // intPart[16] is the fractional part of the element whose integer part is intPart[0].
+    // Looped for the instruction cache, as in Matrix_TranslateRotateZYX. intPart[16] is the fractional half of the
+    // element whose integer half is intPart[0].
     for (elem = &src->xx; elem != &src->xx + 16; elem++) {
         temp = *elem * 0x10000;
         intPart[0] = (temp >> 0x10);
