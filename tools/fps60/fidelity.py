@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
-"""F1: compare the keyframe sequences of two run.py result directories, scene by scene.
+"""F1 and F4: compare the keyframe sequences and the audio of two run.py result directories, scene by scene.
 
 A scene passes when, over the logic ticks both windows cover, every tick has a keyframe in both, the
 keyframes' fb_hash values are equal, and with the noise pin on, so are their noise_hash values (the noise
 commands as the game wrote them). Both runs must have the same noise pin setting. On a failure the scene
 is run again from both ROMs with a frame dump at the first differing tick's final field, and the ares
-framediff.py report is written. See tools/fps60/README.md.
+framediff.py report is written.
+
+F4 compares the AI buffers (length and hash) frame by frame from each run's audio anchor. Both runs need
+the full audio pin (run.py --audio-pin on). See tools/fps60/README.md.
 """
 
 import argparse
@@ -16,6 +19,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import audio  # noqa: E402
 import corpus  # noqa: E402
 import run  # noqa: E402
 
@@ -53,7 +57,7 @@ def dump(result, scene_name, frame, out):
     scene = next(s for s in corpus.SCENES if s["name"] == scene_name)
     ppm = out / f"{scene_name}.ppm"
     run.run_scene(rom, symbols, Path(meta["runner"]), scene, out, "on" if meta.get("noise_pin") else None,
-                  dump_frames=[(frame, ppm)])
+                  dump_frames=[(frame, ppm)], audio_pin=meta.get("audio_pin", 0))
     return ppm
 
 
@@ -114,7 +118,34 @@ def main():
         else:
             print(f"{scene}: PASS, {n} ticks identical (ticks {min(kb.keys() & kc.keys())} to {max(kb.keys() & kc.keys())})")
     print("F1 FAIL" if failed else "F1 PASS")
-    sys.exit(1 if failed else 0)
+    audio_failed = f4(args.base, args.cand, base_meta, cand_meta, scenes)
+    sys.exit(1 if failed or audio_failed else 0)
+
+
+def f4(base, cand, base_meta, cand_meta, scenes):
+    pins = (base_meta.get("audio_pin", 0), cand_meta.get("audio_pin", 0))
+    if pins != (audio.PIN["on"], audio.PIN["on"]):
+        print(f"F4 FAIL: audio pin 0x{pins[0]:02X} in the base, 0x{pins[1]:02X} in the candidate; F4 needs both "
+              "runs with --audio-pin on")
+        return True
+    failed = False
+    for scene in scenes:
+        if scene not in cand_meta["scenes"]:
+            continue
+        n, first, count, why = audio.compare(base / scene / "audio.tsv", cand / scene / "audio.tsv")
+        if why:
+            print(f"{scene}: F4 FAIL, {why}")
+            failed = True
+        elif first:
+            b, c = first
+            print(f"{scene}: F4 FAIL, first differing audio frame {b['rel']} after the anchor (base frame "
+                  f"{b['frame']} len {b['len']} hash {b['hash']}, candidate frame {c['frame']} len {c['len']} "
+                  f"hash {c['hash']}), {count} of {n} frames differ")
+            failed = True
+        else:
+            print(f"{scene}: F4 PASS, {n} audio frames identical")
+    print("F4 FAIL" if failed else "F4 PASS")
+    return failed
 
 
 if __name__ == "__main__":

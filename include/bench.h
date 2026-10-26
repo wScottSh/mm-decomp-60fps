@@ -239,4 +239,78 @@ void Bench_EmuxExit(void);
 // emux XPROFREAD metric ids (ares/n64/cpu/emux.cpp); slot -1 reads the totals since power-on
 #define XPROF_RSP_CYCLES 0x0200     // non-halted RSP time, 750 MHz units
 
+/**
+ * Audio fidelity (F4, tools/fps60/README.md). Every buffer the audio thread hands to the AI is hashed as
+ * RDRAM holds it, which is what the AI's DMA plays. The audio pin makes that PCM a function of the game
+ * alone: each pinned path replaces a value that audio-thread timing would otherwise feed into the output.
+ * run.py finds gBenchAudioConfig in the ROM by its magic and patches `pin`.
+ */
+#define BENCH_AUDIO_MAGIC 0x41554449 // "AUDI"
+
+// BenchAudioConfig.pin
+#define BENCH_AUDIO_HASH (1 << 0)        // record every AI buffer's hash
+#define BENCH_AUDIO_PIN_CMDS (1 << 1)    // lockstep: tick N's audio commands reach a fixed audio frame
+#define BENCH_AUDIO_PIN_AI (1 << 2)      // osAiGetLength comes from a model of the AI, not the clock
+#define BENCH_AUDIO_PIN_RANDOM (1 << 3)  // audio randomness and the noise wave do not read osGetCount or code
+#define BENCH_AUDIO_PIN_LOADS (1 << 4)   // an async load's chunk is done on the frame after it was started
+#define BENCH_AUDIO_PIN_DMA (1 << 5)     // a frame's sample DMAs are done before its RSP task can start
+
+typedef struct BenchAudioConfig {
+    u32 magic;
+    u32 pin; // BENCH_AUDIO_*
+} BenchAudioConfig;
+
+extern BenchAudioConfig gBenchAudioConfig;
+
+typedef struct BenchAudioFrame {
+    /* 0x00 */ u32 frame;   // AudioThread_Update calls before this one; BENCH_RECORD_WRITING while written
+    /* 0x04 */ u32 retrace; // VI retraces since boot (BenchField.seq)
+    /* 0x08 */ u32 tick;    // gBenchProbe.tick
+    /* 0x0C */ u32 len;     // bytes handed to osAiSetNextBuffer
+    /* 0x10 */ u32 hash;    // FNV-1a over the buffer's words
+    /* 0x14 */ u32 aiLen;   // osAiGetLength() this frame
+    /* 0x18 */ u32 aiUsed;  // the length the frame computed its size from (the model's with the AI pin)
+    /* 0x1C */ u32 due;     // with BENCH_AUDIO_PIN_CMDS, frames before this one may run
+    /* 0x20 */ u32 cmds;    // audio commands processed two frames before, when this buffer was synthesized
+    /* 0x24 */ u32 cmdHash; // FNV-1a over their two words
+} BenchAudioFrame; // size = 0x28
+
+#define BENCH_AUDIO_RING 1024
+
+/**
+ * What the harness reads after the window (run.py, AUDIO_*). Frame N's record is ring entry
+ * N % BENCH_AUDIO_RING, written only for frames that hand the AI a buffer.
+ */
+typedef struct BenchAudio {
+    /* 0x00 */ u32 magic;
+    /* 0x04 */ u32 frames;       // AudioThread_Update calls started
+    /* 0x08 */ u32 anchor;       // with BENCH_AUDIO_PIN_CMDS, the due frame of tick settleTick + 1
+    /* 0x0C */ BenchAudioFrame* ring;
+    /* 0x10 */ u32 layout;       // sizeof(BenchAudioFrame) << 16 | BENCH_AUDIO_RING
+    /* 0x14 */ u32 sendRefused;   // command batches the full queue refused (the game merges them)
+    /* 0x18 */ u32 tagOverflow;  // batches sent while the tag ring was full
+    /* 0x1C */ u32 graphWaits;   // ticks whose Audio_Update waited for the audio thread
+    /* 0x20 */ u32 audioWaits;   // frames that waited for a tick's Audio_Update
+    /* 0x24 */ u32 resetFrames;  // frames run while the graph thread waited on an audio heap reset
+    /* 0x28 */ u32 aiDropped;    // buffers the AI model had no room for
+} BenchAudio;
+
+extern BenchAudio gBenchAudio;
+
+void Bench_AudioFrameBegin(void);
+void Bench_AudioFrameEnd(void);
+u32 Bench_AudioAiLength(u32 aiLen);
+void Bench_AudioSubmit(void* buf, u32 size);
+s32 Bench_AudioCmdsDue(void);
+void Bench_AudioCmdsSent(s32 sent);
+void Bench_AudioCmd(u32 opArgs, u32 data);
+u32 Bench_AudioRandom(u32 random, u32 taskCount);
+s16* Bench_AudioNoiseWave(u32 random);
+u32 Bench_AudioCount(u32 count);
+s32 Bench_AudioPinLoads(void);
+void Bench_AudioUpdateBegin(struct GameState* gameState);
+void Bench_AudioUpdateEnd(struct GameState* gameState);
+void Bench_AudioGraphWait(s32 waiting);
+u32 Bench_AudioGraphRandom(void);
+
 #endif

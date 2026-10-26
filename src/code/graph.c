@@ -268,11 +268,13 @@ void Graph_UpdateGame(GameState* gameState) {
     GameState_IncrementFrameCount(gameState);
     if (R_AUDIOMGR_DEBUG_LEVEL < 3) {
 #if BENCH
+        Bench_AudioUpdateBegin(gameState);
         Bench_SysEnter(BENCH_SYS_AUDIO_UPDATE);
 #endif
         Audio_Update();
 #if BENCH
         Bench_SysExit();
+        Bench_AudioUpdateEnd(gameState);
 #endif
     }
 }

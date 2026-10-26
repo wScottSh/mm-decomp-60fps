@@ -267,7 +267,13 @@ void GameState_Destroy(GameState* gameState) {
     PRINTF(T("\n***** game デストラクタ開始 *****\n\n", "\n***** game destructor start *****\n\n"));
 
     AudioMgr_StopAllSfxExceptSystem();
+#if BENCH
+    Bench_AudioUpdateBegin(gameState);
+#endif
     Audio_Update();
+#if BENCH
+    Bench_AudioUpdateEnd(gameState);
+#endif
     osRecvMesg(&gameState->gfxCtx->queue, NULL, OS_MESG_BLOCK);
 
     if (gameState->destroy != NULL) {
