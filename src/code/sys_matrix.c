@@ -998,80 +998,42 @@ void Matrix_TranslateRotateZYX(Vec3f* translation, Vec3s* rot) {
     f32 cos = Math_CosS(rot->z);
     f32 temp1;
     f32 temp2;
+    f32* row;
 
+    // One loop body per row instead of four copies: the same float operations in the same order, in a quarter of the
+    // code, so each limb's call misses the instruction cache fewer times (VR4300 UM ch. 11, 16 KiB I-cache).
+    // row[0], row[4], row[8], row[12] are the row's x, y, z, w columns (xx, xy, xz, xw for the first row).
     // No check for z != 0, presumably since translation is interleaved.
-    temp1 = cmf->xx;
-    temp2 = cmf->xy;
-    cmf->xw += temp1 * translation->x + temp2 * translation->y + cmf->xz * translation->z;
-    cmf->xx = temp1 * cos + temp2 * sin;
-    cmf->xy = temp2 * cos - temp1 * sin;
-
-    temp1 = cmf->yx;
-    temp2 = cmf->yy;
-    cmf->yw += temp1 * translation->x + temp2 * translation->y + cmf->yz * translation->z;
-    cmf->yx = temp1 * cos + temp2 * sin;
-    cmf->yy = temp2 * cos - temp1 * sin;
-
-    temp1 = cmf->zx;
-    temp2 = cmf->zy;
-    cmf->zw += temp1 * translation->x + temp2 * translation->y + cmf->zz * translation->z;
-    cmf->zx = temp1 * cos + temp2 * sin;
-    cmf->zy = temp2 * cos - temp1 * sin;
-
-    temp1 = cmf->wx;
-    temp2 = cmf->wy;
-    cmf->ww += temp1 * translation->x + temp2 * translation->y + cmf->wz * translation->z;
-    cmf->wx = temp1 * cos + temp2 * sin;
-    cmf->wy = temp2 * cos - temp1 * sin;
+    for (row = &cmf->xx; row != &cmf->xy; row++) {
+        temp1 = row[0];
+        temp2 = row[4];
+        row[12] += temp1 * translation->x + temp2 * translation->y + row[8] * translation->z;
+        row[0] = temp1 * cos + temp2 * sin;
+        row[4] = temp2 * cos - temp1 * sin;
+    }
 
     if (rot->y != 0) {
         sin = Math_SinS(rot->y);
         cos = Math_CosS(rot->y);
 
-        temp1 = cmf->xx;
-        temp2 = cmf->xz;
-        cmf->xx = temp1 * cos - temp2 * sin;
-        cmf->xz = temp1 * sin + temp2 * cos;
-
-        temp1 = cmf->yx;
-        temp2 = cmf->yz;
-        cmf->yx = temp1 * cos - temp2 * sin;
-        cmf->yz = temp1 * sin + temp2 * cos;
-
-        temp1 = cmf->zx;
-        temp2 = cmf->zz;
-        cmf->zx = temp1 * cos - temp2 * sin;
-        cmf->zz = temp1 * sin + temp2 * cos;
-
-        temp1 = cmf->wx;
-        temp2 = cmf->wz;
-        cmf->wx = temp1 * cos - temp2 * sin;
-        cmf->wz = temp1 * sin + temp2 * cos;
+        for (row = &cmf->xx; row != &cmf->xy; row++) {
+            temp1 = row[0];
+            temp2 = row[8];
+            row[0] = temp1 * cos - temp2 * sin;
+            row[8] = temp1 * sin + temp2 * cos;
+        }
     }
 
     if (rot->x != 0) {
         sin = Math_SinS(rot->x);
         cos = Math_CosS(rot->x);
 
-        temp1 = cmf->xy;
-        temp2 = cmf->xz;
-        cmf->xy = temp1 * cos + temp2 * sin;
-        cmf->xz = temp2 * cos - temp1 * sin;
-
-        temp1 = cmf->yy;
-        temp2 = cmf->yz;
-        cmf->yy = temp1 * cos + temp2 * sin;
-        cmf->yz = temp2 * cos - temp1 * sin;
-
-        temp1 = cmf->zy;
-        temp2 = cmf->zz;
-        cmf->zy = temp1 * cos + temp2 * sin;
-        cmf->zz = temp2 * cos - temp1 * sin;
-
-        temp1 = cmf->wy;
-        temp2 = cmf->wz;
-        cmf->wy = temp1 * cos + temp2 * sin;
-        cmf->wz = temp2 * cos - temp1 * sin;
+        for (row = &cmf->xx; row != &cmf->xy; row++) {
+            temp1 = row[4];
+            temp2 = row[8];
+            row[4] = temp1 * cos + temp2 * sin;
+            row[8] = temp2 * cos - temp1 * sin;
+        }
     }
 }
 
@@ -1159,72 +1121,16 @@ void Matrix_SetTranslateRotateYXZ(f32 x, f32 y, f32 z, Vec3s* rot) {
 Mtx* Matrix_MtxFToMtx(MtxF* src, Mtx* dest) {
     s32 temp;
     u16* intPart = (u16*)&dest->m[0][0];
-    u16* fracPart = (u16*)&dest->m[2][0];
+    f32* elem;
 
-    // For some reason the first 9 elements use the intPart temp for the fractional part.
-    temp = src->xx * 0x10000;
-    intPart[0] = (temp >> 0x10);
-    intPart[16 + 0] = temp;
-
-    temp = src->yx * 0x10000;
-    intPart[1] = (temp >> 0x10);
-    intPart[16 + 1] = temp;
-
-    temp = src->zx * 0x10000;
-    intPart[2] = (temp >> 0x10);
-    intPart[16 + 2] = temp;
-
-    temp = src->wx * 0x10000;
-    intPart[3] = (temp >> 0x10);
-    intPart[16 + 3] = temp;
-
-    temp = src->xy * 0x10000;
-    intPart[4] = (temp >> 0x10);
-    intPart[16 + 4] = temp;
-
-    temp = src->yy * 0x10000;
-    intPart[5] = (temp >> 0x10);
-    intPart[16 + 5] = temp;
-
-    temp = src->zy * 0x10000;
-    intPart[6] = (temp >> 0x10);
-    intPart[16 + 6] = temp;
-
-    temp = src->wy * 0x10000;
-    intPart[7] = (temp >> 0x10);
-    intPart[16 + 7] = temp;
-
-    temp = src->xz * 0x10000;
-    intPart[8] = (temp >> 0x10);
-    intPart[16 + 8] = temp;
-
-    temp = src->yz * 0x10000;
-    intPart[9] = (temp >> 0x10);
-    fracPart[9] = temp;
-
-    temp = src->zz * 0x10000;
-    intPart[10] = (temp >> 0x10);
-    fracPart[10] = temp;
-
-    temp = src->wz * 0x10000;
-    intPart[11] = (temp >> 0x10);
-    fracPart[11] = temp;
-
-    temp = src->xw * 0x10000;
-    intPart[12] = (temp >> 0x10);
-    fracPart[12] = temp;
-
-    temp = src->yw * 0x10000;
-    intPart[13] = (temp >> 0x10);
-    fracPart[13] = temp;
-
-    temp = src->zw * 0x10000;
-    intPart[14] = (temp >> 0x10);
-    fracPart[14] = temp;
-
-    temp = src->ww * 0x10000;
-    intPart[15] = (temp >> 0x10);
-    fracPart[15] = temp;
+    // A loop rather than 16 unrolled copies, for the instruction cache as in Matrix_TranslateRotateZYX.
+    // intPart[16] is the fractional part of the element whose integer part is intPart[0].
+    for (elem = &src->xx; elem != &src->xx + 16; elem++) {
+        temp = *elem * 0x10000;
+        intPart[0] = (temp >> 0x10);
+        intPart[16] = temp;
+        intPart++;
+    }
 
     return dest;
 }
