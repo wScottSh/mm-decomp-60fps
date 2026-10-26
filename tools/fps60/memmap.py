@@ -2,7 +2,7 @@
 """
 Static RDRAM layout from a build's ELF: boot/code segment sizes and the system heap.
 
-    tools/bench/memmap.py [build/n64-us/mm-n64-us.elf] [other.elf ...]
+    tools/fps60/memmap.py [build/n64-us/mm-n64-us.elf] [other.elf ...]
 
 The system heap runs from the end of the `buffers` segment to the framebuffers at the top of
 RAM (src/boot/main.c), so anything added to code/bss shrinks it one-for-one.

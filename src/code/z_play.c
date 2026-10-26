@@ -999,18 +999,36 @@ void Play_UpdateMain(PlayState* this) {
                     }
                 } else {
                     Room_ProcessRoomRequest(this, &this->roomCtx);
+#if BENCH
+                    Bench_SysEnter(BENCH_SYS_COLLISION);
+#endif
                     CollisionCheck_AT(this, &this->colChkCtx);
                     CollisionCheck_OC(this, &this->colChkCtx);
                     CollisionCheck_Damage(this, &this->colChkCtx);
                     CollisionCheck_ClearContext(this, &this->colChkCtx);
+#if BENCH
+                    Bench_SysExit();
+#endif
                     if (!this->haltAllActors) {
+#if BENCH
+                        Bench_SysEnter(BENCH_SYS_ACTOR_UPDATE);
+#endif
                         Actor_UpdateAll(this, &this->actorCtx);
+#if BENCH
+                        Bench_SysExit();
+#endif
                     }
                     Cutscene_UpdateManual(this, &this->csCtx);
                     Cutscene_UpdateScripted(this, &this->csCtx);
+#if BENCH
+                    Bench_SysEnter(BENCH_SYS_EFFECT);
+#endif
                     Effect_UpdateAll(this);
                     EffectSs_UpdateAll(this);
                     EffFootmark_Update(this);
+#if BENCH
+                    Bench_SysExit();
+#endif
                 }
             } else {
                 Rumble_SetUpdateEnabled(false);
@@ -1018,7 +1036,13 @@ void Play_UpdateMain(PlayState* this) {
 
             Room_Noop(this, &this->roomCtx.curRoom, &input[1], 0);
             Room_Noop(this, &this->roomCtx.prevRoom, &input[1], 1);
+#if BENCH
+            Bench_SysEnter(BENCH_SYS_SKYBOX);
+#endif
             Skybox_Update(&this->skyboxCtx);
+#if BENCH
+            Bench_SysExit();
+#endif
 
             if (IS_PAUSED(&this->pauseCtx)) {
                 KaleidoScopeCall_Update(this);
@@ -1026,8 +1050,14 @@ void Play_UpdateMain(PlayState* this) {
                 GameOver_Update(this);
             }
 
+#if BENCH
+            Bench_SysEnter(BENCH_SYS_MESSAGE);
+#endif
             Message_Update(this);
             Interface_Update(this);
+#if BENCH
+            Bench_SysExit();
+#endif
             AnimTaskQueue_Update(this, &this->animTaskQueue);
             SoundSource_UpdateAll(this);
             ShrinkWindow_Update(this->state.framerateDivisor);
@@ -1035,6 +1065,9 @@ void Play_UpdateMain(PlayState* this) {
         }
     }
 
+#if BENCH
+    Bench_SysEnter(BENCH_SYS_CAMERA);
+#endif
     if (!sp5C || gDbgCamEnabled) {
         s32 i;
 
@@ -1046,14 +1079,23 @@ void Play_UpdateMain(PlayState* this) {
         }
         Camera_Update(this->cameraPtrs[this->nextCamera]);
     }
+#if BENCH
+    Bench_SysExit();
+#endif
 
     if (!sp5C) {
         Play_UpdateWaterCamera(this, this->cameraPtrs[this->nextCamera]);
         Distortion_Update();
     }
 
+#if BENCH
+    Bench_SysEnter(BENCH_SYS_ENVIRONMENT);
+#endif
     Environment_Update(this, &this->envCtx, &this->lightCtx, &this->pauseCtx, &this->msgCtx, &this->gameOverCtx,
                        this->state.gfxCtx);
+#if BENCH
+    Bench_SysExit();
+#endif
 
     if (this->sramCtx.status != 0) {
         if (gSaveContext.save.isOwlSave) {
@@ -1096,6 +1138,9 @@ void Play_PostWorldDraw(PlayState* this) {
         KaleidoScopeCall_Draw(this);
     }
 
+#if BENCH
+    Bench_SysEnter(BENCH_SYS_MESSAGE);
+#endif
     if (gSaveContext.gameMode == GAMEMODE_NORMAL) {
         Interface_Draw(this);
     }
@@ -1103,6 +1148,9 @@ void Play_PostWorldDraw(PlayState* this) {
     if (!IS_PAUSED(&this->pauseCtx) || (this->msgCtx.currentTextId != 0xFF)) {
         Message_Draw(this);
     }
+#if BENCH
+    Bench_SysExit();
+#endif
 
     if (this->gameOverCtx.state != GAMEOVER_INACTIVE) {
         GameOver_FadeLights(this);
@@ -1282,9 +1330,18 @@ void Play_DrawMain(PlayState* this) {
 
             if (!this->soaringCsOrSoTCsPlaying) {
                 if (1) {
+#if BENCH
+                    Bench_SysEnter(BENCH_SYS_SKYBOX);
+#endif
                     if (((u32)this->skyboxId != SKYBOX_NONE) && !this->envCtx.skyboxDisabled) {
                         if ((this->skyboxId == SKYBOX_NORMAL_SKY) || (this->skyboxId == SKYBOX_3)) {
+#if BENCH
+                            Bench_SysEnter(BENCH_SYS_ENVIRONMENT);
+#endif
                             Environment_UpdateSkybox(this->skyboxId, &this->envCtx, &this->skyboxCtx);
+#if BENCH
+                            Bench_SysExit();
+#endif
                             Skybox_Draw(&this->skyboxCtx, gfxCtx, this->skyboxId, this->envCtx.skyboxBlend,
                                         this->view.eye.x, this->view.eye.y, this->view.eye.z);
                         } else if (!this->skyboxCtx.shouldDraw) {
@@ -1292,8 +1349,17 @@ void Play_DrawMain(PlayState* this) {
                                         this->view.eye.z);
                         }
                     }
+#if BENCH
+                    Bench_SysExit();
+#endif
 
+#if BENCH
+                    Bench_SysEnter(BENCH_SYS_ENVIRONMENT);
+#endif
                     Environment_Draw(this);
+#if BENCH
+                    Bench_SysExit();
+#endif
                 }
 
                 lights = LightContext_NewLights(&this->lightCtx, gfxCtx);
@@ -1309,13 +1375,22 @@ void Play_DrawMain(PlayState* this) {
                     //! FAKE:
                     u32 roomDrawFlags = ((1) ? 1 : 0) | (((void)0, 1) ? 2 : 0);
 
+#if BENCH
+                    Bench_SysEnter(BENCH_SYS_ROOM_DRAW);
+#endif
                     Scene_Draw(this);
                     if (this->roomCtx.unk78) {
                         Room_Draw(this, &this->roomCtx.curRoom, roomDrawFlags & 3);
                         Room_Draw(this, &this->roomCtx.prevRoom, roomDrawFlags & 3);
                     }
+#if BENCH
+                    Bench_SysExit();
+#endif
                 }
 
+#if BENCH
+                Bench_SysEnter(BENCH_SYS_SKYBOX);
+#endif
                 if (this->skyboxCtx.shouldDraw) {
                     Vec3f quakeOffset;
 
@@ -1325,10 +1400,19 @@ void Play_DrawMain(PlayState* this) {
                                     this->view.eye.y + quakeOffset.y, this->view.eye.z + quakeOffset.z);
                     }
                 }
+#if BENCH
+                Bench_SysExit();
+#endif
 
+#if BENCH
+                Bench_SysEnter(BENCH_SYS_ENVIRONMENT);
+#endif
                 if (this->envCtx.precipitation[PRECIP_RAIN_CUR] != 0) {
                     Environment_DrawRain(this, &this->view, gfxCtx);
                 }
+#if BENCH
+                Bench_SysExit();
+#endif
             }
 
             if (1) {
@@ -1336,10 +1420,19 @@ void Play_DrawMain(PlayState* this) {
             }
 
             if (1) {
+#if BENCH
+                Bench_SysEnter(BENCH_SYS_ACTOR_DRAW);
+#endif
                 Actor_DrawAll(this, &this->actorCtx);
+#if BENCH
+                Bench_SysExit();
+#endif
             }
 
             if (1) {
+#if BENCH
+                Bench_SysEnter(BENCH_SYS_ENVIRONMENT);
+#endif
                 if (!this->envCtx.sunDisabled) {
                     temp.x = this->view.eye.x + this->envCtx.sunPos.x;
                     temp.y = this->view.eye.y + this->envCtx.sunPos.y;
@@ -1348,6 +1441,9 @@ void Play_DrawMain(PlayState* this) {
                 }
 
                 Environment_DrawCustomLensFlare(this);
+#if BENCH
+                Bench_SysExit();
+#endif
             }
 
             if (1) {
@@ -1369,9 +1465,15 @@ void Play_DrawMain(PlayState* this) {
             }
 
             if (1) {
+#if BENCH
+                Bench_SysEnter(BENCH_SYS_ENVIRONMENT);
+#endif
                 if (this->envCtx.sandstormState != SANDSTORM_OFF) {
                     Environment_DrawSandstorm(this, this->envCtx.sandstormState);
                 }
+#if BENCH
+                Bench_SysExit();
+#endif
             }
 
             if (this->worldCoverAlpha != 0) {
@@ -1431,16 +1533,34 @@ void Play_DrawMain(PlayState* this) {
 SkipPostWorldDraw:
 
     if ((this->view.unk164 != 0) && !gDbgCamEnabled) {
+#if BENCH
+        Bench_SysEnter(BENCH_SYS_CAMERA);
+#endif
         Camera_Update(GET_ACTIVE_CAM(this));
+#if BENCH
+        Bench_SysExit();
+#endif
         View_UpdateViewingMatrix(&this->view);
         this->view.unk164 = 0;
         if ((this->skyboxId != SKYBOX_NONE) && !this->envCtx.skyboxDisabled) {
+#if BENCH
+            Bench_SysEnter(BENCH_SYS_SKYBOX);
+#endif
             Skybox_UpdateMatrix(&this->skyboxCtx, this->view.eye.x, this->view.eye.y, this->view.eye.z);
+#if BENCH
+            Bench_SysExit();
+#endif
         }
     }
 
     if (!sp25B) {
+#if BENCH
+        Bench_SysEnter(BENCH_SYS_ENVIRONMENT);
+#endif
         Environment_DrawSkyboxStars(this);
+#if BENCH
+        Bench_SysExit();
+#endif
     }
 
     CLOSE_DISPS(gfxCtx);
@@ -1500,7 +1620,13 @@ void Play_Main(GameState* thisx) {
         if (1) {
             this->state.gfxCtx = NULL;
         }
+#if BENCH
+        Bench_Phase(BENCH_PHASE_UPDATE);
+#endif
         Play_Update(this);
+#if BENCH
+        Bench_Phase(BENCH_PHASE_GAME);
+#endif
         this->state.gfxCtx = gfxCtx;
     }
 
@@ -1510,7 +1636,13 @@ void Play_Main(GameState* thisx) {
         if (1) {
             *CONTROLLER1(&this->state) = D_801F6C18;
         }
+#if BENCH
+        Bench_Phase(BENCH_PHASE_DRAW);
+#endif
         Play_Draw(this);
+#if BENCH
+        Bench_Phase(BENCH_PHASE_GAME);
+#endif
         *CONTROLLER1(&this->state) = input;
     }
 

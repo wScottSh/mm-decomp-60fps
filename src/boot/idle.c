@@ -28,6 +28,49 @@ u8 gViConfigModeType;
 #include "macros.h"
 
 u8 D_80096B20 = 1;
+
+#if BENCH
+#include "bench.h"
+
+BenchCpuClock gBenchCpuClock;
+
+/**
+ * Charges the time since the last switch to the thread that ran it and names the thread that runs
+ * next. Interrupts are disabled. gBenchCpuClock lives in boot, so this runs before code is loaded;
+ * it counts only once Bench_Boot enables it.
+ */
+void Bench_CpuSwitch(u32 nextId) {
+    BenchCpuClock* clock = &gBenchCpuClock;
+    u32 now;
+
+    if (!clock->enabled) {
+        return;
+    }
+    now = osGetCount();
+    // COUNT runs at half the PClock (VR4300 manual, 6.3.4)
+    clock->thread[clock->current % BENCH_THREAD_SLOTS] += (now - clock->last) * 2;
+    clock->last = now;
+    clock->current = nextId;
+    clock->switches++;
+}
+
+/**
+ * __osEnqueueAndYield with the switch charged on both sides. The thread that runs next is the run
+ * queue's head, or this thread when it goes back on the run queue ahead of that head
+ * (__osEnqueueThread places it after threads of equal priority).
+ */
+void Bench_EnqueueAndYield(OSThread** queue) {
+    OSThread* self = __osRunningThread;
+    OSThread* next = __osRunQueue;
+
+    if ((queue == &__osRunQueue) && (self->priority > next->priority)) {
+        next = self;
+    }
+    Bench_CpuSwitch(next->id);
+    __osEnqueueAndYield(queue);
+    Bench_CpuSwitch(__osRunningThread->id);
+}
+#endif
 vu8 gViConfigUseBlack = true;
 u8 gViConfigAdditionalScanLines = 0;
 u32 gViConfigFeatures = OS_VI_DITHER_FILTER_ON | OS_VI_GAMMA_OFF;
