@@ -161,8 +161,9 @@ typedef struct BenchTick {
 
 /**
  * The noise pin's walk of one gfx task's display lists (Bench_PinNoise, src/code/bench.c). A noise command
- * is one the pin rewrites: a G_SETOTHERMODE_H/L, G_RDPSETOTHERMODE or G_SETCOMBINE that selects G_CD_NOISE,
- * G_AD_NOISE, G_AC_DITHER or the combiner's NOISE input, or that writes the pipeline mode.
+ * is one that writes a field the pin rewrites, whatever value it writes: every G_RDPSETOTHERMODE and
+ * G_SETCOMBINE, a G_SETOTHERMODE_H that covers the color dither, alpha dither or pipeline mode bits, and a
+ * G_SETOTHERMODE_L that covers the alpha compare bits.
  */
 typedef struct BenchNoiseRecord {
     u32 hash;     // FNV-1a over both words of every noise command as the game wrote it, in walk order

@@ -733,6 +733,26 @@ static Gfx Bench_PinnedCommand(Gfx cmd) {
     return cmd;
 }
 
+/**
+ * Whether the command writes any field the pin rewrites, so that adding, dropping or changing it can change
+ * the pinned image. G_RDPSETOTHERMODE and G_SETCOMBINE always do.
+ */
+static s32 Bench_PinCovers(Gfx cmd) {
+    u32 w0 = cmd.words.w0;
+
+    switch (w0 >> 24) {
+        case G_SETOTHERMODE_H:
+            return (Bench_OtherModeMask(w0) &
+                    ((3 << G_MDSFT_RGBDITHER) | (3 << G_MDSFT_ALPHADITHER) | G_PM_1PRIMITIVE)) != 0;
+
+        case G_SETOTHERMODE_L:
+            return (Bench_OtherModeMask(w0) & (3 << G_MDSFT_ALPHACOMPARE)) != 0;
+
+        default:
+            return true;
+    }
+}
+
 static void Bench_NoiseCommand(BenchNoiseWalk* walk, Gfx* cmd, u32 addr) {
     BenchNoisePatch* slot = Bench_NoiseSlot(addr);
     Gfx orig = *cmd;
@@ -749,17 +769,20 @@ static void Bench_NoiseCommand(BenchNoiseWalk* walk, Gfx* cmd, u32 addr) {
                 // The game rewrote this command since a walk pinned it; G_NOOP never matches a later read.
                 slot->pinned.words.w0 = G_NOOP << 24;
             }
-            return;
-        }
-        if (slot == NULL) {
-            gBenchProbe.noise.overflow++;
+            if (!Bench_PinCovers(orig)) {
+                return;
+            }
         } else {
-            slot->addr = addr;
-            slot->orig = orig;
-            slot->pinned = pinned;
+            if (slot == NULL) {
+                gBenchProbe.noise.overflow++;
+            } else {
+                slot->addr = addr;
+                slot->orig = orig;
+                slot->pinned = pinned;
+            }
+            *cmd = pinned;
+            walk->record.patched++;
         }
-        *cmd = pinned;
-        walk->record.patched++;
     }
     walk->record.commands++;
     walk->record.hash = Bench_Fnv(Bench_Fnv(walk->record.hash, orig.words.w0), orig.words.w1);
