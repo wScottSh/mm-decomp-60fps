@@ -21,9 +21,15 @@ BOOT = {
     "file_select_empty": 4,
     "file_select_named": 5,
     "retail_boot": 6,
+    "south_clock_town_deku": 7,
 }
 
-BUTTONS = {"A": 0x8000, "B": 0x4000, "Z": 0x2000, "Start": 0x1000}
+BUTTONS = {"A": 0x8000, "B": 0x4000, "Z": 0x2000, "Start": 0x1000, "R": 0x0010, "C-down": 0x0004}
+
+
+def press(tick, button):
+    # One tick down, then released: the game sees the press on exactly that tick.
+    return [(tick, BUTTONS[button], 0, 0), (tick + 1, 0, 0, 0)]
 
 
 def circle(start, ticks, period, radius=80):
@@ -43,4 +49,13 @@ SCENES = [
     {"name": "field", "boot": "termina_field", "inputs": [(0, 0, 0, 85)]},
     {"name": "mountain", "boot": "mountain_village_winter", "inputs": []},
     {"name": "greatbay", "boot": "great_bay_coast", "inputs": []},
+    # P2-ref part a entry criteria (docs/fps60/architecture.md Q9); README.md, Scenes, says what each exercises.
+    # pause: open, turn to the map page, close. Kaleido runs at divisor 2 and opening captures the background.
+    {"name": "pause", "boot": "south_clock_town", "inputs": press(10, "Start") + press(80, "R") + press(150, "Start")},
+    # Back through the gate tunnel into West Clock Town. MM never starts a tile transition, so a scene change.
+    {"name": "transition", "boot": "termina_field", "inputs": [(0, 0, 0, -85)]},
+    # Taking off the Deku Mask: the transformation enables priority motion blur (Player_Action_86).
+    {"name": "blur", "boot": "south_clock_town_deku", "inputs": press(10, "C-down")},
+    # Out of the gate, then one slow circle: bridge, town wall and grass while the camera turns.
+    {"name": "moving", "boot": "termina_field", "inputs": [(0, 0, 0, 85)] + circle(40, 300, 300)},
 ]
