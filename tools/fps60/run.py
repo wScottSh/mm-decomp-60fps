@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Run a BENCH=1 Majora's Mask ROM through the pinned n64-run over the fps60 scene corpus.
 
-Writes per-field TSVs, the per-tick keyframe sequence, and presentation and tick-cadence summaries.
+Writes per-field TSVs, the per-tick keyframe sequence, presentation and tick-cadence summaries, and the
+load metrics (CPU, RSP and RDP busy per field and per tick, CPU time per engine system).
 See tools/fps60/README.md.
 """
 
@@ -21,6 +22,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import corpus  # noqa: E402
+import load  # noqa: E402
 
 RUNNER = Path.home() / "n64-timing/build/mm60-runner/rundir/bin/n64-run"
 RUNNER_SHA256_PREFIX = "1f9d59f6"  # preferences line 6
@@ -33,8 +35,7 @@ SEED = 0x12345678
 MAX_INPUTS = 512
 
 # BenchConfig and BenchProbe layouts, include/bench.h
-CFG_SCENE, CFG_WARMUP, CFG_FRAMES, CFG_SEED, CFG_FLAGS, CFG_RETRACE, CFG_INPUT_COUNT, CFG_INPUTS = (
-    4, 8, 12, 16, 20, 24, 28, 32)
+CFG_SCENE, CFG_SEED, CFG_FLAGS, CFG_RETRACE, CFG_INPUT_COUNT, CFG_INPUTS = 4, 8, 12, 16, 20, 24
 PROBE_MAGIC_OFF, PROBE_TICK, PROBE_DIVISOR, PROBE_SETTLED, PROBE_SETTLE_TICK = 0x00, 0x04, 0x08, 0x0C, 0x10
 PROBE_CUR_BUF, PROBE_CFBS, PROBE_CFB_SIZE, PROBE_CFB_TICK = 0x14, 0x18, 0x1C, 0x20
 CFB_COUNT = 3
@@ -43,9 +44,9 @@ CFB_COUNT = 3
 # (BenchNoiseRecord, parallel to cfbTick) and BenchProbe.noise (BenchNoiseTotals).
 NOISE_PIN_SYMBOL = "Bench_PinNoise"
 CFG_NOISE_PIN = CFG_INPUTS + 8 * MAX_INPUTS
-PROBE_CFB_NOISE, NOISE_RECORD_SIZE = 0x2C, 16
+PROBE_CFB_NOISE, NOISE_RECORD_SIZE = 0x48, 16
 NOISE_RECORD = ["noise_hash", "noise_cmds", "noise_patched", "dl_cmds"]
-PROBE_NOISE_TOTALS = 0x5C
+PROBE_NOISE_TOTALS = 0x78
 NOISE_TOTALS = ["walks", "visited", "commands", "patched", "unresolved", "unknown", "overflow", "mismatch"]
 NOISE_MUST_BE_ZERO = ["unresolved", "unknown", "overflow", "mismatch"]
 NOISE_PIN = {"off": 0, "on": 1, "check": 2}  # BENCH_NOISE_PIN_*
@@ -86,7 +87,7 @@ def patch_rom(rom, scene, noise_pin):
         raise SystemExit(f"{scene['name']}: {len(inputs)} inputs, the ROM holds {MAX_INPUTS}")
     if [i[0] for i in inputs] != sorted(i[0] for i in inputs):
         raise SystemExit(f"{scene['name']}: inputs are not sorted by tick")
-    struct.pack_into(">5I", data, at + CFG_SCENE, corpus.BOOT[scene["boot"]], 0, 0, SEED, FLAG_PIN_EFFECT_BUDGET)
+    struct.pack_into(">3I", data, at + CFG_SCENE, corpus.BOOT[scene["boot"]], SEED, FLAG_PIN_EFFECT_BUDGET)
     struct.pack_into(">I", data, at + CFG_INPUT_COUNT, len(inputs))
     if noise_pin:
         struct.pack_into(">I", data, at + CFG_NOISE_PIN, NOISE_PIN[noise_pin])
@@ -105,11 +106,11 @@ def script(symbols, window, noise_pin):
 
     steps = [f"until {a(PROBE_MAGIC_OFF)} w == 0x{PROBE_MAGIC:08X}", f"until {a(PROBE_SETTLED)} w != 0",
              "mark window", f"peek cfbs {a(PROBE_CFBS)} w", f"peek cfb_size {a(PROBE_CFB_SIZE)} w",
-             f"peek settle_tick {a(PROBE_SETTLE_TICK)} w"]
+             f"peek settle_tick {a(PROBE_SETTLE_TICK)} w"] + load.start_steps(probe)
     # A peek logged at frame=N reads the state after N fields, so it belongs to stats row N-1.
     per_field = ["wait 1", f"peek tick {a(PROBE_TICK)} w", f"peek div {a(PROBE_DIVISOR)} w",
                  f"peek cur [{a(PROBE_CUR_BUF)}] w", f"peek fb [[{a(PROBE_CUR_BUF)}]] w"]
-    per_field += [f"peek c{i} {a(PROBE_CFB_TICK + 4 * i)} w" for i in range(CFB_COUNT)]
+    per_field += [f"peek c{i} {a(PROBE_CFB_TICK + 4 * i)} w" for i in range(CFB_COUNT)] + load.field_peeks(probe)
     if keyframe is not None:
         per_field += [f"peek k{i} 0x{keyframe + 4 * i:08X} w" for i in range(CFB_COUNT)]
     end = []
@@ -117,7 +118,7 @@ def script(symbols, window, noise_pin):
         per_field += [f"peek n{i}_{k} {a(PROBE_CFB_NOISE + NOISE_RECORD_SIZE * i + 4 * j)} w"
                       for i in range(CFB_COUNT) for j, k in enumerate(NOISE_RECORD)]
         end = [f"peek total_{k} {a(PROBE_NOISE_TOTALS + 4 * j)} w" for j, k in enumerate(NOISE_TOTALS)]
-    return steps + per_field * window + end + ["stop"]
+    return steps + per_field * window + end + load.end_steps(probe) + ["stop"]
 
 
 def run_runner(runner, rom_bytes, steps, scene_dir, dump_frames=()):
@@ -281,8 +282,8 @@ def run_scene(rom, symbols, runner, scene, out, noise_pin, dump_frames=()):
     if not m or m.group(2) != scene["boot"]:
         raise SystemExit(f"{name}: the ROM booted {m.group(2) if m else 'nothing'}, not {scene['boot']}")
     marks, peeks = parse_events(events)
-    rows, settle_tick = per_field(name, read_stats(scene_dir / "stats.tsv"), marks, peeks, window,
-                                  KEYFRAME_SYMBOL in symbols, noise_pin)
+    stats_rows = read_stats(scene_dir / "stats.tsv")
+    rows, settle_tick = per_field(name, stats_rows, marks, peeks, window, KEYFRAME_SYMBOL in symbols, noise_pin)
     imgs, tks = images(rows), ticks(rows)
     write_tsv(scene_dir / "fields.tsv", rows)
     keyframes = [i for i in imgs if i["keyframe"]]
@@ -308,6 +309,7 @@ def run_scene(rom, symbols, runner, scene, out, noise_pin, dump_frames=()):
                  f"{totals['unresolved']}, unknown {totals['unknown']}, overflow {totals['overflow']}, mismatch "
                  f"{totals['mismatch']}")
     (scene_dir / "summary.json").write_text(json.dumps(summary, indent=1) + "\n")
+    summary["load"] = load.analyze(name, peeks, marks["window"], window, stats_rows, scene_dir, write_tsv)
     print(f"{name}: measured {summary['fields']} fields, {summary['images']} images, {summary['ticks']} ticks "
           f"({wall[0]:.1f} s){noise}", flush=True)
     bad = [k for k in NOISE_MUST_BE_ZERO if noise_pin and summary["noise_totals"][k]]
@@ -420,6 +422,7 @@ def measure(args, map_path, names, by_name, runner_digest, rom, symbols, out):
 
     summaries = [results[n][0] for n in names]
     write_tsv(out / "summary.tsv", [flat(s) for s in summaries])
+    write_tsv(out / "load.tsv", [load.flat(s["load"]) for s in summaries])
     (out / "wall.tsv").write_text(
         "run\twall_s\tjobs\tload_before\tload_after\n"
         + "".join(f"{n}\t{results[n][1][0]:.1f}\t{args.jobs}\t{results[n][1][1]:.2f}\t{results[n][1][2]:.2f}\n"

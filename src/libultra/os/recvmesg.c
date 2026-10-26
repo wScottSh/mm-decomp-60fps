@@ -1,4 +1,7 @@
 #include "ultra64.h"
+#if BENCH
+#include "bench.h"
+#endif
 
 s32 osRecvMesg(OSMesgQueue* mq, OSMesg* msg, s32 flags) {
     register u32 saveMask = __osDisableInt();
@@ -9,7 +12,11 @@ s32 osRecvMesg(OSMesgQueue* mq, OSMesg* msg, s32 flags) {
             return -1;
         }
         __osRunningThread->state = 8;
+#if BENCH
+        Bench_EnqueueAndYield(&mq->mtQueue);
+#else
         __osEnqueueAndYield(&mq->mtQueue);
+#endif
     }
 
     if (msg != NULL) {

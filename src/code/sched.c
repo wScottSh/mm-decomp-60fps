@@ -11,6 +11,10 @@
 #include "z64speed_meter.h"
 #include "z64thread.h"
 
+#if BENCH
+#include "bench.h"
+#endif
+
 FaultClient sSchedFaultClient;
 
 OSTime sRSPGFXStartTime;
@@ -383,6 +387,11 @@ void Sched_RunTask(Scheduler* sched, OSScTask* spTask, OSScTask* dpTask) {
         }
 
         // Begin task execution
+#if BENCH
+        if (spTask->list.t.type == M_AUDTASK) {
+            Bench_RspAudioStart();
+        }
+#endif
         osSpTaskStartGo(&spTask->list);
         sched->curRSPTask = spTask;
         if (spTask == dpTask && sched->curRDPTask == NULL) {
@@ -421,6 +430,9 @@ void Sched_HandleNotify(Scheduler* sched) {
 }
 
 void Sched_HandleRetrace(Scheduler* sched) {
+#if BENCH
+    Bench_FieldSnapshot();
+#endif
     ViConfig_UpdateBlack();
     sched->retraceCount++;
 
@@ -464,6 +476,11 @@ void Sched_HandleRSPDone(Scheduler* sched) {
         return;
     }
 
+#if BENCH
+    if (sched->curRSPTask->list.t.type == M_AUDTASK) {
+        Bench_RspAudioStop();
+    }
+#endif
     // Log the time based on the type of task
     time = osGetTime();
     switch (sched->curRSPTask->list.t.type) {

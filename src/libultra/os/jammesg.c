@@ -1,4 +1,7 @@
 #include "ultra64.h"
+#if BENCH
+#include "bench.h"
+#endif
 
 s32 osJamMesg(OSMesgQueue* mq, OSMesg msg, s32 flag) {
     register u32 saveMask = __osDisableInt();
@@ -6,7 +9,11 @@ s32 osJamMesg(OSMesgQueue* mq, OSMesg msg, s32 flag) {
     while (mq->validCount >= mq->msgCount) {
         if (flag == OS_MESG_BLOCK) {
             __osRunningThread->state = OS_STATE_WAITING;
+#if BENCH
+            Bench_EnqueueAndYield(&mq->fullQueue);
+#else
             __osEnqueueAndYield(&mq->fullQueue);
+#endif
         } else {
             __osRestoreInt(saveMask);
             return -1;

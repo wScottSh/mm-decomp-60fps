@@ -1,4 +1,7 @@
 #include "ultra64.h"
+#if BENCH
+#include "bench.h"
+#endif
 
 void osSetThreadPri(OSThread* thread, OSPri p) {
     register u32 saveMask = __osDisableInt();
@@ -17,7 +20,11 @@ void osSetThreadPri(OSThread* thread, OSPri p) {
 
         if (__osRunningThread->priority < __osRunQueue->priority) {
             __osRunningThread->state = OS_STATE_RUNNABLE;
+#if BENCH
+            Bench_EnqueueAndYield(&__osRunQueue);
+#else
             __osEnqueueAndYield(&__osRunQueue);
+#endif
         }
     }
 

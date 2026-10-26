@@ -1,5 +1,5 @@
 /**
- * Benchmark mode, see include/bench.h and tools/bench/README.md.
+ * Benchmark mode, see include/bench.h and tools/fps60/README.md.
  */
 #include "global.h"
 #include "bench.h"
@@ -8,10 +8,8 @@
 #include "gfx.h"
 #include "irqmgr.h"
 #include "scheduler.h"
-#include "thga.h"
-#include "z64speed_meter.h"
-#include "zelda_arena.h"
-#include "libc64/malloc.h"
+#include "z64actor_dlftbls.h"
+#include "z64thread.h"
 #include "libc64/qrand.h"
 #include "libc64/sprintf.h"
 #include "libu64/pad.h"
@@ -45,73 +43,51 @@ static BenchScene sBenchScenes[] = {
     { "retail_boot", BENCH_KIND_RETAIL, 0, 0, 0, 0 },
 };
 
-typedef struct BenchRecord {
-    u32 vi;           // VI retraces since the previous frame ended
-    u32 preTicks;     // Graph_Update start -> GameState_Update: input, Audio_Update, gfx pool setup (OSTime ticks)
-    u32 gameTicks;    // GameState_Update wall time: game logic + display list build
-    u32 cpuTicks;     // whole Graph_Update wall time, also includes waiting on the previous RCP task
-    u32 periodTicks;  // gGraphUpdatePeriod: time between consecutive Graph_ExecuteAndDraw ends
-    u32 rspGfxTicks;  // gRSPGfxTimeTotal
-    u32 rspAudTicks;  // gRSPAudioTimeTotal
-    u32 rdpTicks;     // gRDPTimeTotal (gfx task start -> DP full sync, not true RDP busy time)
-    u8 divisor;
-    u8 actors;
-    u16 pad;
-    u32 opaBytes;     // display list bytes used this frame
-    u32 xluBytes;
-    u32 ovlBytes;
-    u32 thaFree;      // game state arena remaining
-    u32 zeldaFree;
-    u32 zeldaMaxFree;
-    u32 sysFree;
-    u32 benchTicks;   // time spent in Bench_EndFrame bookkeeping on the previous frame
-    // emux XPROF slot 0 deltas for this frame (zero without emux)
-    u32 cpuCycles;
-    u32 icMiss;
-    u32 dcMiss;
-    u32 dcWb;
-    u32 rspCycles;
-    u32 rspHalted;
-    u32 rdramTotal;
-    u32 rdramCpu;     // icache + dcache + uncached
-    u32 rdramSpDma;
-    u32 rdramDp;      // DP draw + DP command DMA
-    // DPC counters (RCP clocks) from the previous frame's end to this one's: Bench_EndFrame reads, then clears them
-    u32 dpcClock;
-    u32 dpcBufBusy;
-    u32 dpcPipeBusy;
-    u32 dpcTmem;
-} BenchRecord;
-
-typedef enum BenchPhase {
-    BENCH_PHASE_WARMUP,
-    BENCH_PHASE_MEASURE,
-    BENCH_PHASE_DONE
-} BenchPhase;
-
 // retraceTicks is the gIrqMgrRetraceTime that IrqMgr measures on the fps60 runner (BENCH START line)
 BenchConfig gBenchConfig = {
-    BENCH_CONFIG_MAGIC, 0, 120, BENCH_MAX_FRAMES, 0x12345678, BENCH_FLAG_RECORD | BENCH_FLAG_PIN_EFFECT_BUDGET,
-    782715, 0, { { 0 } }, BENCH_NOISE_PIN_OFF,
+    BENCH_CONFIG_MAGIC, 0, 0x12345678, BENCH_FLAG_PIN_EFFECT_BUDGET, 782715, 0, { { 0 } }, BENCH_NOISE_PIN_OFF,
 };
 
 BenchProbe gBenchProbe;
 
 extern CfbInfo sGraphCfbInfos[3];
 
-static BenchRecord sBenchRecords[BENCH_MAX_FRAMES];
 static BenchScene* sBenchScene;
-static s32 sBenchPhase = BENCH_PHASE_WARMUP;
-static s32 sBenchFrame = 0;
 static s32 sBenchEmux = false;
-static s32 sBenchLastRetrace = 0;
-static OSTime sBenchFrameStart = 0;
-static OSTime sBenchGameStart = 0;
-static OSTime sBenchGameEnd = 0;
-static u32 sBenchOverheadTicks = 0;
-static char sBenchLine[512];
 static s32 sBenchSawFade = false;
 static OSContPad sBenchPad;
+static char sBenchLine[256];
+
+// The harness reads the rings with runner peeks, which can see a record's cache lines in different
+// states (measured: one stale 16-byte line between two new ones). Only uncached KSEG1 aliases of the
+// rings are written, and their cached lines are flushed once at boot.
+static BenchField sBenchFieldRing[BENCH_FIELD_RING];
+static BenchTick sBenchTickRing[BENCH_TICK_RING];
+static volatile BenchField* sBenchFields;
+static volatile BenchTick* sBenchTicks;
+static u32 sBenchFieldSeq = 0;
+static u32 sBenchActorTime[2 * ACTOR_ID_MAX];
+static u32 sBenchActorBegin;
+
+// Graph thread accounting for the open tick
+static s32 sBenchTickOpen = false;
+static BenchTick sBenchTickStart; // the cumulative counters at the open tick's start
+static u32 sBenchClockReads = 0;
+static s32 sBenchPhase = BENCH_PHASE_TAIL;
+static u32 sBenchPhaseWallMark;
+static u32 sBenchPhaseCpuMark;
+static u32 sBenchPhaseWall[BENCH_PHASE_MAX];
+static u32 sBenchPhaseCpu[BENCH_PHASE_MAX];
+static u8 sBenchSysStack[8] = { BENCH_SYS_OTHER };
+static s32 sBenchSysDepth = 0;
+static u32 sBenchSysMark;
+static u32 sBenchSys[BENCH_SYS_MAX];
+
+// RCP counters: the scheduler folds the 24-bit DPC counters into these at every retrace
+static u32 sBenchRdpPipe = 0;
+static u32 sBenchRdpBuf = 0;
+static u32 sBenchRspAudio = 0;
+static s32 sBenchRspAudioRunning = false;
 
 /**
  * Write a NUL-terminated string to IS-Viewer at cart address 0x13FF0000.
@@ -228,12 +204,225 @@ static void Bench_BootPlay(GameState* gameState, BenchScene* scene) {
     SET_NEXT_GAMESTATE(gameState, Play_Init, sizeof(PlayState));
 }
 
+/**
+ * Starts gBenchCpuClock on this (the graph) thread and times Bench_CpuNow, the call every per-system
+ * hook makes twice.
+ */
+static void Bench_StartCpuClock(void) {
+    BenchCpuClock* clock = &gBenchCpuClock;
+    OSIntMask mask = __osDisableInt();
+    u32 start;
+    s32 i;
+
+    clock->last = osGetCount();
+    clock->current = __osRunningThread->id;
+    clock->enabled = true;
+    __osRestoreInt(mask);
+
+    start = osGetCount();
+    for (i = 0; i < 64; i++) {
+        Bench_CpuNow();
+    }
+    gBenchProbe.clockReadCost = (osGetCount() - start) * 2 / 64;
+    sBenchClockReads = 0;
+}
+
+/**
+ * The running thread's CPU time in PClocks. Every caller runs on the graph thread.
+ */
+u32 Bench_CpuNow(void) {
+    BenchCpuClock* clock = &gBenchCpuClock;
+    OSIntMask mask = __osDisableInt();
+    u32 time = clock->thread[clock->current % BENCH_THREAD_SLOTS] + (osGetCount() - clock->last) * 2;
+
+    __osRestoreInt(mask);
+    sBenchClockReads++;
+    return time;
+}
+
+void Bench_Phase(s32 phase) {
+    u32 wall = osGetCount() * 2;
+    u32 cpu = Bench_CpuNow();
+
+    sBenchPhaseWall[sBenchPhase] += wall - sBenchPhaseWallMark;
+    sBenchPhaseCpu[sBenchPhase] += cpu - sBenchPhaseCpuMark;
+    sBenchPhaseWallMark = wall;
+    sBenchPhaseCpuMark = cpu;
+    sBenchPhase = phase;
+}
+
+static void Bench_SysCharge(void) {
+    u32 now = Bench_CpuNow();
+
+    sBenchSys[sBenchSysStack[sBenchSysDepth]] += now - sBenchSysMark;
+    sBenchSysMark = now;
+}
+
+void Bench_SysEnter(s32 system) {
+    Bench_SysCharge();
+    sBenchSysStack[++sBenchSysDepth] = system;
+}
+
+void Bench_SysExit(void) {
+    Bench_SysCharge();
+    sBenchSysDepth--;
+}
+
+// Actor update and draw calls do not nest
+void Bench_ActorBegin(void) {
+    sBenchActorBegin = Bench_CpuNow();
+}
+
+void Bench_ActorEnd(s32 actorId, s32 draw) {
+    sBenchActorTime[(draw ? ACTOR_ID_MAX : 0) + actorId] += Bench_CpuNow() - sBenchActorBegin;
+}
+
+/**
+ * The audio task's RSP time so far. A running task is split at the read, so a field or tick gets the
+ * part that ran inside it. Interrupts are disabled, or the caller is the scheduler.
+ */
+static u32 Bench_RspAudioNow(void) {
+    if (sBenchRspAudioRunning) {
+        Bench_XProfStop(1);
+        sBenchRspAudio += Bench_XProfRead(1, XPROF_RSP_CYCLES);
+        Bench_XProfClear(1);
+        Bench_XProfStart(1);
+    }
+    return sBenchRspAudio;
+}
+
+void Bench_RspAudioStart(void) {
+    if (sBenchEmux) {
+        Bench_XProfClear(1);
+        Bench_XProfStart(1);
+        sBenchRspAudioRunning = true;
+    }
+}
+
+void Bench_RspAudioStop(void) {
+    if (sBenchRspAudioRunning) {
+        Bench_XProfStop(1);
+        sBenchRspAudio += Bench_XProfRead(1, XPROF_RSP_CYCLES);
+        sBenchRspAudioRunning = false;
+    }
+}
+
+/**
+ * The cumulative CPU, RSP and RDP counters into `out`, which has BenchTick's layout for those fields.
+ * Interrupts are disabled.
+ */
+static void Bench_ReadLoad(BenchTick* out, s32 foldDpc) {
+    BenchCpuClock* clock = &gBenchCpuClock;
+    u32 pipe = IO_READ(DPC_PIPEBUSY_REG);
+    u32 buf = IO_READ(DPC_BUFBUSY_REG);
+
+    if (foldDpc) {
+        // 24-bit counters, 0.27 s at 62.5 MHz: folding them every retrace keeps them from wrapping
+        IO_WRITE(DPC_STATUS_REG, DPC_CLR_PIPE_CTR | DPC_CLR_CMD_CTR);
+        sBenchRdpPipe += pipe;
+        sBenchRdpBuf += buf;
+        pipe = buf = 0;
+    }
+    Bench_CpuSwitch(__osRunningThread->id);
+    out->start = osGetCount();
+    out->switches = clock->switches;
+    out->idle = clock->thread[Z_THREAD_ID_IDLE];
+    out->graph = clock->thread[Z_THREAD_ID_GRAPH];
+    out->audio = clock->thread[Z_THREAD_ID_AUDIOMGR];
+    out->sched = clock->thread[Z_THREAD_ID_SCHED];
+    out->irqmgr = clock->thread[Z_THREAD_ID_IRQMGR];
+    out->padmgr = clock->thread[Z_THREAD_ID_PADMGR];
+    out->dmamgr = clock->thread[Z_THREAD_ID_DMAMGR];
+    out->rsp = sBenchEmux ? Bench_XProfRead(-1, XPROF_RSP_CYCLES) : 0;
+    out->rspAudio = Bench_RspAudioNow();
+    out->rdpPipe = sBenchRdpPipe + pipe;
+    out->rdpBuf = sBenchRdpBuf + buf;
+}
+
+/**
+ * Runs on the scheduler thread at every VI retrace. Retrace N's record is ring entry N % BENCH_FIELD_RING;
+ * the harness may read the ring at any instruction, so the record is valid once its seq is stored last.
+ */
+void Bench_FieldSnapshot(void) {
+    volatile BenchField* field;
+    BenchTick load;
+    OSIntMask mask;
+
+    if (!gBenchCpuClock.enabled) {
+        return;
+    }
+    sBenchFieldSeq++;
+    field = &sBenchFields[sBenchFieldSeq % BENCH_FIELD_RING];
+    field->seq = BENCH_RECORD_WRITING;
+    mask = __osDisableInt();
+    Bench_ReadLoad(&load, true);
+    __osRestoreInt(mask);
+    field->count = load.start;
+    field->switches = load.switches;
+    field->idle = load.idle;
+    field->graph = load.graph;
+    field->audio = load.audio;
+    field->rsp = load.rsp;
+    field->rspAudio = load.rspAudio;
+    field->rdpPipe = load.rdpPipe;
+    field->rdpBuf = load.rdpBuf;
+    field->seq = sBenchFieldSeq;
+}
+
+/**
+ * Writes the record of the tick that ends now and starts the next one.
+ */
+static void Bench_TickBoundary(void) {
+    BenchTick now;
+    volatile BenchTick* rec;
+    OSIntMask mask = __osDisableInt();
+    s32 i;
+
+    Bench_ReadLoad(&now, false);
+    __osRestoreInt(mask);
+
+    if (sBenchTickOpen) {
+        BenchTick* from = &sBenchTickStart;
+
+        rec = &sBenchTicks[gBenchProbe.tick % BENCH_TICK_RING];
+        // The harness may read the ring at any instruction: a record is valid once its tick is stored last
+        rec->tick = BENCH_RECORD_WRITING;
+        rec->start = from->start;
+        rec->wall = (now.start - from->start) * 2;
+        rec->switches = now.switches - from->switches;
+        rec->idle = now.idle - from->idle;
+        rec->graph = now.graph - from->graph;
+        rec->audio = now.audio - from->audio;
+        rec->sched = now.sched - from->sched;
+        rec->irqmgr = now.irqmgr - from->irqmgr;
+        rec->padmgr = now.padmgr - from->padmgr;
+        rec->dmamgr = now.dmamgr - from->dmamgr;
+        rec->rsp = now.rsp - from->rsp;
+        rec->rspAudio = now.rspAudio - from->rspAudio;
+        rec->rdpPipe = now.rdpPipe - from->rdpPipe;
+        rec->rdpBuf = now.rdpBuf - from->rdpBuf;
+        rec->clockReads = sBenchClockReads;
+        for (i = 0; i < BENCH_PHASE_MAX; i++) {
+            rec->phaseWall[i] = sBenchPhaseWall[i];
+            rec->phaseCpu[i] = sBenchPhaseCpu[i];
+        }
+        for (i = 0; i < BENCH_SYS_MAX; i++) {
+            rec->sys[i] = sBenchSys[i];
+        }
+        rec->tick = gBenchProbe.tick;
+        gBenchProbe.tickCount++;
+    }
+    sBenchTickStart = now;
+    sBenchTickOpen = true;
+    sBenchClockReads = 0;
+    bzero(sBenchPhaseWall, sizeof(sBenchPhaseWall));
+    bzero(sBenchPhaseCpu, sizeof(sBenchPhaseCpu));
+    bzero(sBenchSys, sizeof(sBenchSys));
+}
+
 s32 Bench_Boot(GameState* gameState) {
     if (gBenchConfig.scene >= ARRAY_COUNT(sBenchScenes)) {
         gBenchConfig.scene = 0;
-    }
-    if (gBenchConfig.frames > BENCH_MAX_FRAMES) {
-        gBenchConfig.frames = BENCH_MAX_FRAMES;
     }
     if (gBenchConfig.inputCount > BENCH_MAX_INPUTS) {
         gBenchConfig.inputCount = BENCH_MAX_INPUTS;
@@ -243,14 +432,26 @@ s32 Bench_Boot(GameState* gameState) {
     gBenchProbe.curBuf = &gScheduler.curBuf;
     gBenchProbe.cfbs = sGraphCfbInfos;
     gBenchProbe.cfbSize = sizeof(CfbInfo);
-    gBenchProbe.magic = BENCH_PROBE_MAGIC;
+    osWritebackDCache(sBenchFieldRing, sizeof(sBenchFieldRing));
+    osInvalDCache(sBenchFieldRing, sizeof(sBenchFieldRing));
+    osWritebackDCache(sBenchTickRing, sizeof(sBenchTickRing));
+    osInvalDCache(sBenchTickRing, sizeof(sBenchTickRing));
+    sBenchFields = (volatile BenchField*)K0_TO_K1(sBenchFieldRing);
+    sBenchTicks = (volatile BenchTick*)K0_TO_K1(sBenchTickRing);
+    gBenchProbe.fields = (BenchField*)sBenchFields;
+    gBenchProbe.ticks = (BenchTick*)sBenchTicks;
+    gBenchProbe.actorTime = sBenchActorTime;
+    gBenchProbe.layout = (sizeof(BenchField) << 24) | (BENCH_FIELD_RING << 20) | (sizeof(BenchTick) << 10) | BENCH_TICK_RING;
+    gBenchProbe.actorIds = ACTOR_ID_MAX;
 
     sBenchEmux = Bench_EmuxDetect() != 0;
+    Bench_StartCpuClock();
+    gBenchProbe.magic = BENCH_PROBE_MAGIC;
 
     sprintf(sBenchLine,
-            "BENCH START scene=%d name=%s seed=0x%08X warmup=%d frames=%d emux=%d retrace_ticks=%u counter_hz=%u\n",
-            gBenchConfig.scene, sBenchScene->name, gBenchConfig.seed, gBenchConfig.warmup, gBenchConfig.frames,
-            sBenchEmux, (u32)gIrqMgrRetraceTime, (u32)OS_CPU_COUNTER);
+            "BENCH START scene=%d name=%s seed=0x%08X emux=%d retrace_ticks=%u counter_hz=%u clock_read_pclk=%u\n",
+            gBenchConfig.scene, sBenchScene->name, gBenchConfig.seed, sBenchEmux, (u32)gIrqMgrRetraceTime,
+            (u32)OS_CPU_COUNTER, gBenchProbe.clockReadCost);
     Bench_Puts(sBenchLine);
 
     Rand_Seed(gBenchConfig.seed);
@@ -279,45 +480,16 @@ static s32 Bench_InScene(GameState* gameState) {
     return (fileSelect->menuMode == FS_MENU_MODE_CONFIG) && (fileSelect->configMode == CM_MAIN_MENU);
 }
 
-void Bench_MarkGameStart(GameState* gameState) {
-    sBenchGameStart = osGetTime();
-}
-
-void Bench_MarkGameEnd(GameState* gameState) {
-    sBenchGameEnd = osGetTime();
-}
-
 void Bench_BeginFrame(GameState* gameState) {
+    if (!gBenchCpuClock.enabled) {
+        gBenchProbe.tick++;
+        return;
+    }
+    Bench_SysEnter(BENCH_SYS_BENCH);
+    Bench_Phase(BENCH_PHASE_PRE);
+    Bench_TickBoundary();
     gBenchProbe.tick++;
-    sBenchFrameStart = osGetTime();
-
-    if (sBenchEmux) {
-        Bench_XProfClear(0);
-        Bench_XProfStart(0);
-    }
-}
-
-static void Bench_Dump(void) {
-    s32 i;
-
-    Bench_Puts("BENCH COLUMNS frame vi pre_ticks game_ticks cpu_ticks period_ticks rsp_gfx_ticks rsp_aud_ticks rdp_ticks divisor actors "
-               "opa_bytes xlu_bytes ovl_bytes tha_free zelda_free zelda_max_free sys_free bench_ticks cpu_cycles "
-               "ic_miss dc_miss dc_wb rsp_cycles rsp_halted rdram_total rdram_cpu rdram_sp_dma rdram_dp "
-               "dpc_clock dpc_bufbusy dpc_pipebusy dpc_tmem\n");
-
-    for (i = 0; i < (s32)gBenchConfig.frames; i++) {
-        BenchRecord* r = &sBenchRecords[i];
-
-        sprintf(sBenchLine, "BENCH F %d %u %u %u %u %u %u %u %u %u %u %u %u %u %u %u %u %u %u %u %u %u %u %u %u %u %u %u %u %u %u %u %u\n",
-                i, r->vi, r->preTicks, r->gameTicks, r->cpuTicks, r->periodTicks, r->rspGfxTicks, r->rspAudTicks, r->rdpTicks, r->divisor,
-                r->actors, r->opaBytes, r->xluBytes, r->ovlBytes, r->thaFree, r->zeldaFree, r->zeldaMaxFree,
-                r->sysFree, r->benchTicks, r->cpuCycles, r->icMiss, r->dcMiss, r->dcWb, r->rspCycles, r->rspHalted,
-                r->rdramTotal, r->rdramCpu, r->rdramSpDma, r->rdramDp, r->dpcClock, r->dpcBufBusy, r->dpcPipeBusy,
-                r->dpcTmem);
-        Bench_Puts(sBenchLine);
-    }
-
-    Bench_Puts("BENCH END\n");
+    Bench_SysExit();
 }
 
 /**
@@ -391,95 +563,7 @@ void Bench_ApplyInput(GameState* gameState) {
 }
 
 void Bench_EndFrame(GraphicsContext* gfxCtx, GameState* gameState) {
-    OSTime endTime = osGetTime();
-    s32 retrace = gScheduler.retraceCount;
-    BenchRecord* r;
-    size_t maxFree;
-    size_t free;
-    size_t alloc;
-    u32 dpcClock = IO_READ(DPC_CLOCK_REG);
-    u32 dpcBufBusy = IO_READ(DPC_BUFBUSY_REG);
-    u32 dpcPipeBusy = IO_READ(DPC_PIPEBUSY_REG);
-    u32 dpcTmem = IO_READ(DPC_TMEM_REG);
-
-    // The counters are 24 bits, 0.27 s at 62.5 MHz; clearing them each frame keeps one frame's count below that.
-    IO_WRITE(DPC_STATUS_REG, DPC_CLR_CLOCK_CTR | DPC_CLR_CMD_CTR | DPC_CLR_PIPE_CTR | DPC_CLR_TMEM_CTR);
-
-    if (sBenchEmux) {
-        Bench_XProfStop(0);
-    }
-
     Bench_UpdateProbe(gameState);
-
-    if (!(gBenchConfig.flags & BENCH_FLAG_RECORD) || (sBenchPhase == BENCH_PHASE_DONE) || !Bench_InScene(gameState)) {
-        return;
-    }
-
-    if (sBenchPhase == BENCH_PHASE_WARMUP) {
-        if (++sBenchFrame >= (s32)gBenchConfig.warmup) {
-            sBenchPhase = BENCH_PHASE_MEASURE;
-            sBenchFrame = 0;
-            sBenchLastRetrace = retrace;
-            sBenchOverheadTicks = 0;
-        }
-        return;
-    }
-
-    r = &sBenchRecords[sBenchFrame];
-
-    r->vi = retrace - sBenchLastRetrace;
-    sBenchLastRetrace = retrace;
-    r->preTicks = sBenchGameStart - sBenchFrameStart;
-    r->gameTicks = sBenchGameEnd - sBenchGameStart;
-    r->cpuTicks = endTime - sBenchFrameStart;
-    r->periodTicks = gGraphUpdatePeriod;
-    r->rspGfxTicks = gRSPGfxTimeTotal;
-    r->rspAudTicks = gRSPAudioTimeTotal;
-    r->rdpTicks = gRDPTimeTotal;
-    r->divisor = gameState->framerateDivisor;
-    r->actors = (sBenchScene->kind == BENCH_KIND_PLAY) ? ((PlayState*)gameState)->actorCtx.totalLoadedActors : 0;
-    r->opaBytes = sizeof(((GfxPool*)NULL)->polyOpaBuffer) - THGA_GetRemaining(&gfxCtx->polyOpa);
-    r->xluBytes = sizeof(((GfxPool*)NULL)->polyXluBuffer) - THGA_GetRemaining(&gfxCtx->polyXlu);
-    r->ovlBytes = sizeof(((GfxPool*)NULL)->overlayBuffer) - THGA_GetRemaining(&gfxCtx->overlay);
-    r->thaFree = GameState_GetArenaSize(gameState);
-    // Only Play sets up ZeldaArena
-    if (ZeldaArena_IsInitialized()) {
-        ZeldaArena_GetSizes(&maxFree, &free, &alloc);
-        r->zeldaFree = free;
-        r->zeldaMaxFree = maxFree;
-    }
-    GetFreeArena(&maxFree, &free, &alloc);
-    r->sysFree = free;
-    r->benchTicks = sBenchOverheadTicks;
-    r->dpcClock = dpcClock;
-    r->dpcBufBusy = dpcBufBusy;
-    r->dpcPipeBusy = dpcPipeBusy;
-    r->dpcTmem = dpcTmem;
-
-    if (sBenchEmux) {
-        r->cpuCycles = Bench_XProfRead(0, XPROF_CPU_CYCLES);
-        r->icMiss = Bench_XProfRead(0, XPROF_ICACHE_MISSES);
-        r->dcMiss = Bench_XProfRead(0, XPROF_DCACHE_MISSES);
-        r->dcWb = Bench_XProfRead(0, XPROF_DCACHE_WRITEBACKS);
-        r->rspCycles = Bench_XProfRead(0, XPROF_RSP_CYCLES);
-        r->rspHalted = Bench_XProfRead(0, XPROF_RSP_HALTED_CYCLES);
-        r->rdramTotal = Bench_XProfRead(0, XPROF_RDRAM_TOTAL);
-        r->rdramCpu = Bench_XProfRead(0, XPROF_RDRAM_ICACHE) + Bench_XProfRead(0, XPROF_RDRAM_DCACHE) +
-                      Bench_XProfRead(0, XPROF_RDRAM_UNCACHED);
-        r->rdramSpDma = Bench_XProfRead(0, XPROF_RDRAM_SP_DMA);
-        r->rdramDp = Bench_XProfRead(0, XPROF_RDRAM_DP_DRAW) + Bench_XProfRead(0, XPROF_RDRAM_DP_DMA);
-    }
-
-    if (++sBenchFrame >= (s32)gBenchConfig.frames) {
-        sBenchPhase = BENCH_PHASE_DONE;
-        Bench_Dump();
-        if (sBenchEmux) {
-            Bench_EmuxExit();
-        }
-        return;
-    }
-
-    sBenchOverheadTicks = osGetTime() - endTime;
 }
 
 /**
