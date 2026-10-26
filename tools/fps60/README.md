@@ -116,12 +116,14 @@ Paths that feed timing into game logic and are not pinned. Each one is outside t
 
 Preferences line 20: retail never shows the same noise-dithered pixels twice, so noise patterns are not part of retail's image. Fidelity runs neutralize noise identically in reference and candidate, and F1 also compares how the game used noise.
 
+The pin also removes a second path from RDP timing to pixels: span buffer coherency. Without `G_PM_1PRIMITIVE`, the RDP prefetches the next span's color and Z before the previous primitive's write-back lands (SDK 12.2.3; the fork models it in `RDP::prefetch`, `ares/n64/rdp/timed.cpp`). Where primitives overlap and read memory (`IM_RD` or `Z_CMP`), the read sees old or new memory depending on RDRAM contention from the CPU, RSP, VI and AI. With noise pinned and the game state identical at every tick (actor positions, rotations, scales and camera, checked by a throwaway per-tick hash), a dead-code build still differed from the reference by single edge pixels in `sct` (25 ticks) and `field` (1 tick). Forcing `G_PM_1PRIMITIVE` removed every one (H1c report). The fork's spec lists `rdp.read-gate` as fail and `hw:stale-read` as pending, so this path is modeled but not yet checked against a console.
+
 `BenchConfig.noisePin` (`include/bench.h`, `BENCH_NOISE_PIN_*`) selects it. The ROM's default is off, so `tools/bench` keeps retail rendering. `run.py` patches it per run.
 
 What it does. `Bench_PinNoise` (`src/code/bench.c`, called from `Graph_TaskSet00` in `graph.c` after the previous gfx task finished and before the task is sent) walks every display-list command the task reaches, in RSP order:
 
 - `G_DL` calls and branches, `G_ENDDL`, the segment table (`G_MOVEWORD G_MW_SEGMENT`), and `G_LOAD_UCODE` switches between F3DZEX2 and S2DEX2. `G_BRANCH_Z` and `G_CULLDL` depend on vertex depth, so the walk takes both paths of a `G_BRANCH_Z` and never culls. A target outside RDRAM or in a segment that was never set counts as `unresolved`. An opcode the active microcode does not define, and S2DEX2's `G_SELECT_DL`, count as `unknown`.
-- A noise command is a `G_SETOTHERMODE_H`, `G_SETOTHERMODE_L`, `G_RDPSETOTHERMODE` or `G_SETCOMBINE` that selects one of the noise reads of the fork's RDP engine (`ares/n64/rdp/engine/rdp_core.c`, `rdp_blend.c`). Each one is rewritten in RDRAM to a fixed substitute:
+- A noise command (the name covers both paths) is a `G_SETOTHERMODE_H`, `G_SETOTHERMODE_L`, `G_RDPSETOTHERMODE` or `G_SETCOMBINE` that selects one of the noise reads of the fork's RDP engine (`ares/n64/rdp/engine/rdp_core.c`, `rdp_blend.c`), or that writes the pipeline mode. Each one is rewritten in RDRAM to a fixed substitute:
 
 | Noise read | Substitute | Why this one |
 |---|---|---|
@@ -129,22 +131,26 @@ What it does. `Bench_PinNoise` (`src/code/bench.c`, called from `Graph_TaskSet00
 | `G_AD_NOISE` (alpha dither) | `G_AD_PATTERN` | Ordered, and the same mean dither. |
 | `G_AC_DITHER` (alpha compare against a noise threshold) | `G_AC_THRESHOLD` | Keeps the compare, against the blend color's alpha. |
 | combiner RGB input A = `NOISE`, either cycle | `G_CCMUX_1` | `NOISE` is abc100000 in 1/256 units; its mean is 1. |
+| pipeline mode (`G_PM_NPRIMITIVE` or `G_PM_1PRIMITIVE`) | `G_PM_1PRIMITIVE` | Each primitive waits for the previous one's write-back, so no read is stale. Primitives drawn before a task's first pipeline-mode write keep the RSP's starting mode. |
 
 - The per-tick record (`BenchProbe.cfbNoise[i]`, parallel to `cfbTick[i]`) holds `noise_hash`, FNV-1a over both words of every noise command as the game wrote it, in walk order. It also holds the noise command count, how many of them this walk rewrote, and the commands visited. `run.py` reads the record of the displayed `CfbInfo` each field, like `cfbTick`.
 - Idempotent. Display lists in asset, object and static memory are rewritten in place, and the rewrite stays. A log (`sBenchNoiseStatic`) keeps each rewritten command's address, original and substitute. A later walk that finds the substitute at that address hashes the original. If the game has rewritten the command since, the walk treats it as new. The gfx pools are rebuilt every frame, so their log (`sBenchNoisePool`) is cleared at each walk. `--noise-pin check` proves the property on a run: every task is walked twice, and the second walk must hash the same and patch nothing (`mismatch` 0).
 
-What it detects. With the pin on, a tick fails F1 when its image differs anywhere (pixels outside noise, and the substitutes' deterministic dither) or when the game emitted different noise commands: a noise mode added, removed or changed (for example `G_CD_MAGICSQ` written where retail writes `G_CD_NOISE`), a changed combiner that reads or stops reading `NOISE`, or the same commands in a different order or count.
+What it detects. With the pin on, a tick fails F1 when its image differs anywhere (pixels outside noise, and the substitutes' deterministic dither) or when the game emitted different noise commands: a noise mode added, removed or changed (for example `G_CD_MAGICSQ` written where retail writes `G_CD_NOISE`), a changed combiner that reads or stops reading `NOISE`, a changed pipeline mode, or the same commands in a different order or count. Every othermode write that covers the pipeline bit is hashed, so a change that adds, drops or reorders those writes also fails, even when the image could not show it.
 
 What it cannot detect.
 
-- The noise patterns themselves. A change that only moves RDP timing passes, which is the point (line 20).
+- The noise patterns themselves, and which overlapping pixels read stale memory. A change that only moves RDP timing passes, which is the point (line 20).
+- Edge pixels where retail would read stale memory: the pin always draws them as 1PRIMITIVE does.
 - Pixels in noise-dithered draws that differ only by the dither the substitute replaced. The substitute draws them with a fixed dither, so a change in the colors, geometry or textures of a noise draw still shows. But a difference that retail's noise would have hidden or shown at random shows here as the substitute renders it.
 - A command at an address that the walk patched earlier, which the game later overwrites with exactly the substitute's words. The walk then hashes the old original. Reference and candidate do the same, so F1 only misses a candidate that changes this alone. Gfx-pool addresses are immune, because their log lives for one walk.
 - A rewritten command that the game reads back as data and copies elsewhere. The copy then holds the substitute and is not a noise command. No such read is known in the corpus.
 - Noise commands in display lists that no gfx task reaches, and noise in a task other than `Graph_TaskSet00`'s (MM sends no other gfx task).
 - Partial othermode writes that cover half of a 2-bit dither or compare field count as `unknown`, and fail the run, because their result depends on state before.
 
-Cost. The walk visits about 11,500 commands per tick in `sct` (measured, see the H1c report) on the CPU before the task is sent. It changes CPU and so RDP timing, but with the pin on that no longer reaches the image. Perf runs use `--noise-pin off`, where `Bench_PinNoise` returns at once.
+Cost. The walk visits about 11,500 commands per tick in `sct` (measured, see the H1c report) on the CPU before the task is sent, and 1PRIMITIVE adds RDP time per primitive. Both change timing, but with the pin on timing no longer reaches the image. File select, which already lags in retail, shows fewer ticks in its window with the pin on. Perf runs use `--noise-pin off`, where `Bench_PinNoise` returns at once.
+
+Pin off is retail rendering, not H1a's bytes. Any code or data layout change moves CPU timing and so the RDP clock at each pixel, so a pin-off run of this tree does not reproduce H1a's `fb_hash` values even though the pin-off path only returns (H1c report).
 
 ## Gotchas
 

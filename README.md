@@ -4,7 +4,7 @@ This fork of the [zeldaret/mm](https://github.com/zeldaret/mm) decompilation cha
 
 ## Rules
 
-- **Pixel-exact.** Every image the game shows at a logic tick must match retail pixel for pixel under the same input. The in-between images must match a recorded golden set. Input may never appear on screen later than in retail. RDP dither noise is the one exception, because the console's noise generator never repeats. Fidelity runs will neutralize it identically in both builds and still check that the game emits the same noise commands (in progress).
+- **Pixel-exact.** Every image the game shows at a logic tick must match retail pixel for pixel under the same input. The in-between images must match a recorded golden set. Input may never appear on screen later than in retail. RDP timing is the one exception: the console's noise generator never repeats, and where primitives overlap the RDP can read stale memory depending on bus contention. Fidelity runs neutralize both identically in both builds (the noise pin) and still check that the game emits the same noise and pipeline-mode commands.
 - **Same game speed.** Game logic keeps its retail tick, 20 Hz in gameplay. The extra images come from interpolating between the previous and current tick.
 - **Real hardware.** NTSC N64 with the Expansion Pak, the retail flash save, and a 32 MiB ROM. Each optimization must name a hardware mechanism with a reference. No change may rely on a quirk of the emulator.
 - **Measured, not guessed.** Each change is measured before and after on a pinned, deterministic build of the [ares timing-model fork](https://github.com/wScottSh/ares) (`tools/fps60/`). It is kept only if it helps and no scene gets worse. The target is at most 90% of a 16.7 ms field for each of the CPU, RSP and RDP, which leaves margin because the emulator is not yet calibrated against a console.
@@ -14,9 +14,9 @@ This fork of the [zeldaret/mm](https://github.com/zeldaret/mm) decompilation cha
 **Phase: building the harness.** No retail game code has changed yet. The only source changes are benchmark hooks behind `BENCH=1`.
 
 - Research is done: [frame pipeline and interpolation hazards](docs/research/mm-frame-pipeline.md) and [60 fps techniques](docs/research/fps60-techniques.md).
-- The harness (`tools/fps60/`) runs six scenes deterministically and checks fidelity. Baseline: [docs/fps60/baseline.md](docs/fps60/baseline.md).
+- The harness (`tools/fps60/`) runs six scenes deterministically and checks fidelity. Baseline: [docs/fps60/baseline.md](docs/fps60/baseline.md). With the noise pin on (the default), a build that only adds dead code passes F1 in all six scenes, and a one-pixel change fails at exactly its tick.
 - Retail today shows one image every 3 fields (20 fps) in every gameplay scene tested. File select lags on about a quarter of its frames.
-- Next: neutralize RDP noise in fidelity runs, measure CPU, RSP and RDP load per field, and settle the interpolation architecture. Then the per-scene budget gap decides where optimization starts.
+- Next: measure CPU, RSP and RDP load per field, and settle the interpolation architecture. Then the per-scene budget gap decides where optimization starts.
 - Main risk: interpolation does not reduce render work, so every field needs a full render. The research estimates (inferred) that CPU time per tick must drop 2 to 4 times and RSP graphics time 1.3 to 2.1 times with identical output. The only route found for the RSP is optimizing MM's own microcode. RDP busy time in retail is not measured yet, and it decides whether 60 fps is reachable.
 
 ## Measure
