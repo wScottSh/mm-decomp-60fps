@@ -10,7 +10,7 @@ This survey lists every technique found that could get MM to a new image on ever
 - **Fidelity classes.** **identical** means the output is the same by construction. **may differ** means it is identical only under a condition that must be proven per scene. **differs** means it changes pixels, audio or logic, so the program rejects it.
 - **Code links.** Links to this repo point at main `caeb013ac597d556367c30e6f5d292100f93e58f` (base URL `https://github.com/wScottSh/mm-decomp-60fps/blob/caeb013ac597d556367c30e6f5d292100f93e58f/`). A bare MM path such as `src/code/z_rcp.c L290-L298` refers to that tree. Third-party links are permalinks at the commit each section names.
 - **Detail lives in the appendices.** Sections A to E are the five research slices, each with its own technique table, sources list and gaps. The front sections are the synthesis.
-- **Retail numbers.** Retail per-tick numbers come from [tools/bench/README.md](../../tools/bench/README.md), section "Fork baseline". They come from the ares timing fork and are not hardware-calibrated.
+- **Retail numbers.** Retail per-tick numbers come from `tools/bench/README.md`, removed in `c05eaddb2` (read it with `git show c05eaddb2^:tools/bench/README.md`), section "Fork baseline". They come from the ares timing fork and are not hardware-calibrated.
 
 ## Bottom line
 
@@ -263,7 +263,7 @@ Counts are measured with grep on the clone. "Call sites" means source lines.
 
 #### What transfers to N64 (inferred unless cited)
 - The DL is built once per tick and references each matrix by address. On N64 the same DL could be resubmitted per field with the CPU writing lerped fixed-point `Mtx` (64 bytes each) into those addresses between RSP tasks. That avoids rebuilding the DL. It needs either a second matrix buffer the DL can be pointed at (for example by segment) or a strict wait for the previous RSP task, because the RSP reads matrices while it runs.
-- The RSP and RDP cost does not drop. Each field runs the full gfx task. The bench README (`tools/bench/README.md` lines 125-126, read this session) lists 15.8-24.7 ms RSP gfx and 26.1-34.2 ms gfx task start to full sync per tick (fork, not hardware-calibrated). Three fields per tick at that cost do not fit in 50 ms. The RSP and RDP savings in appendices C and D would have to land first.
+- The RSP and RDP cost does not drop. Each field runs the full gfx task. The bench README (`c05eaddb2^:tools/bench/README.md` lines 125-126, read this session) lists 15.8-24.7 ms RSP gfx and 26.1-34.2 ms gfx task start to full sync per tick (fork, not hardware-calibrated). Three fields per tick at that cost do not fit in 50 ms. The RSP and RDP savings in appendices C and D would have to land first.
 - The recorder is C++ STL (maps, vectors, heap). An N64 version would need a fixed-size arena and flat arrays. The 64-bit float lerp on VR4300 is cheap per matrix, but replaying the matrix stack ops and the tree matching on 4 MB-ish budgets is unmeasured.
 - Non-matrix motion needs DL patching. The ports added custom opcodes (`G_SETTILESIZE_LERP`, `G_MW_SEGMENT_INTERP`) that the real F3DZEX2 microcode does not have. On N64 these would become CPU-side rewrites of `G_SETTILESIZE` words or segment tables per field, or a microcode change.
 - CPU-written vertices (Epona skin, blure trails, Bigslime, `EnRaf`) need per-field vertex blending into a second buffer, as Shipwright does. On N64 that is CPU and RDRAM bandwidth per field.
@@ -449,7 +449,7 @@ Totals: 108 `gEXMatrixGroup*` call sites. By preset they are DecomposedNormal 41
 **What transfers (inferred).**
 - The **hazard catalog and the ID scheme** transfer as-is. N64 interpolation needs the same answers: stable per-object keys, spawn-reset flags for slot-reused effects, a camera-cut detector, actor teleport flags and billboard handling. Zelda64Recomp uses only explicit IDs with linear order. So an N64 implementation needs no draw-call hashing or heuristic matching, which is the expensive, error-prone part of RT64. It needs a table keyed by ID that holds the previous tick's matrix (or its inputs).
 - The **"skip = render current state"** semantics transfer and are the fidelity-safe default ([R/src/common/rt64_math.cpp#L177-L198](https://github.com/rt64/rt64/blob/23cab603c4f9f4a8b369b38e036f1aa484603878/src/common/rt64_math.cpp#L177-L198)). An object with no prior key, or one flagged skip, draws the keyframe matrix on all three fields. That is what retail shows on those fields.
-- The **RSP and RDP cost does not shrink.** On N64 the display list must run once per field. Interpolation saves nothing on the RSP gfx task (16-25 ms per execution at retail, cited, `tools/bench/README.md` "Fork baseline", lines 113-131) or on the RDP (26-34 ms). Both must fit in 16.7 ms per field. RT64 sidesteps both on a host GPU.
+- The **RSP and RDP cost does not shrink.** On N64 the display list must run once per field. Interpolation saves nothing on the RSP gfx task (16-25 ms per execution at retail, cited, `c05eaddb2^:tools/bench/README.md` "Fork baseline", lines 113-131) or on the RDP (26-34 ms). Both must fit in 16.7 ms per field. RT64 sidesteps both on a host GPU.
 - **CPU options per field.** (a) Re-run the draw pass with interpolated inputs. This costs the draw share of the 18-31 ms game ms every field. (b) Build the list once per tick, then for each field overwrite the `Mtx` words in place with interpolated values and resubmit. RT64 already keys transforms by `Mtx` RDRAM address (`physicalAddressTransformMap`, [R/src/hle/rt64_rsp.cpp#L410](https://github.com/rt64/rt64/blob/23cab603c4f9f4a8b369b38e036f1aa484603878/src/hle/rt64_rsp.cpp#L410), `#L466`), and `gEXEditGroupByAddress` relies on that. That suggests a "matrix patch table" of (Mtx address, prev MtxF, cur MtxF, flags). CPU cost is then about the matrix count times (lerp plus float-to-s15.16 conversion). Option (b) needs the matrix memory rewritten between RSP runs, so it needs per-field matrix copies or sync. It also needs the tick's display list to stay valid for 3 executions.
 - **SIMPLE vs DECOMPOSE.** Zelda64Recomp uses decomposition for actors (41 DecomposedNormal sites) and SIMPLE for the camera. Decomposition means polar or QR decomposition plus quaternion slerp per matrix ([R/src/hle/rt64_rigid_body.cpp#L78-L104](https://github.com/rt64/rt64/blob/23cab603c4f9f4a8b369b38e036f1aa484603878/src/hle/rt64_rigid_body.cpp#L78-L104)). On the VR4300 that is far costlier than component lerp. Interpolating the inputs (position, rotation, joint table) and re-deriving matrices is the alternative (see appendix A).
 - **Vertex and tile interpolation.** Sword trails, skin and Woodfall water need CPU per-vertex lerp of Vtx arrays per field. Texture scroll needs `G_SETTILESIZE` words rewritten per field. Tile coordinates are 10.2 fixed point, so 1/3-step scroll values quantize to quarter texels (inferred).
@@ -500,7 +500,7 @@ Lesson for this program (inferred). Keyframes must be the retail display list an
 - https://api.github.com/repos/N64Recomp/N64ModernRuntime/contents?ref=df7e820d8c55e4fcb4616c210cbb2c01b25cd48c
 - https://api.github.com/repos/zeldaret/mm/contents?ref=5607eec18bae68e4cd38ef6d1fa69d7f1d84bfc8
 - https://api.github.com/repos/zeldaret/mm/license
-- Local: `tools/bench/README.md` (Fork baseline, lines 113-131); `include/gfx.h` lines 36-40.
+- Local: `c05eaddb2^:tools/bench/README.md` (Fork baseline, lines 113-131); `include/gfx.h` lines 36-40.
 
 ### Gaps
 
@@ -762,7 +762,7 @@ These are large rectangles: long spans and an ideal row order. SDK 12.1.2 warns:
 - One full-screen pass in MM's mode touches about 4 x 153,600 = 614,400 B: color read, Z read, color write and Z write.
 - VI scanout of one 16-bit field is 153,600 B. That is 9.2 MB/s at 59.94 fields/s.
 - Peak RDRAM bandwidth is 2 B per RDRAM clock at RCLK 250 MHz, so 500 MB/s. This is derived from the ares spec rows `ri.octbyte` (NEC uPD488170L "2 B per tc") and `clock.unit` (RCLK 250 MHz). It is consistent with n64brew RDRAM: the iQue's 1536 MB/s is "about 3x that of N64's RDRAM" (cited).
-- The fork's uncalibrated baseline is 4.79 to 5.59 MiB of RDRAM traffic per tick, including RDP (cited, MM `tools/bench/README.md` "Fork baseline"). Suppose every field redraws the full scene, and roughly that much traffic per field minus 2 extra VI fields stays. Then 5.59 MiB - 2 x 0.146 MiB = 5.3 MiB per 16.68 ms, or about 333 MB/s. That is about 67% of the theoretical 500 MB/s peak (inferred). Not all of that traffic repeats per field, because CPU logic stays at 20 Hz. This is an upper-bound sketch, not a measurement.
+- The fork's uncalibrated baseline is 4.79 to 5.59 MiB of RDRAM traffic per tick, including RDP (cited, MM `c05eaddb2^:tools/bench/README.md` "Fork baseline"). Suppose every field redraws the full scene, and roughly that much traffic per field minus 2 extra VI fields stays. Then 5.59 MiB - 2 x 0.146 MiB = 5.3 MiB per 16.68 ms, or about 333 MB/s. That is about 67% of the theoretical 500 MB/s peak (inferred). Not all of that traffic repeats per field, because CPU logic stays at 20 Hz. This is an upper-bound sketch, not a measurement.
 
 ### 4. RDRAM page and latency behavior
 
@@ -988,7 +988,7 @@ Overlay loading in MM (upstream @ `710e1a7d`):
 - Lever (inferred): place hot code (actor update and draw loops, `Actor_UpdateAll`, collision, `SkelAnime`, matrix code, `Gfx` builders) so it does not alias in the I-cache. Two ways: align overlay allocations to I-cache-friendly offsets, or link hot code from overlays into a resident segment. Either changes code addresses and heap addresses, but not the logic ops. The risk comes from UB that depends on layout (section 3).
 
 Estimate of what the measured misses cost (inferred; inputs cited):
-- Inputs: the fork baseline gives I$/D$ misses per frame of 21.1k/20.3k (South Clock Town), 18.9k/21.6k (Termina Field), 16.6k/14.5k (Mountain Village), 21.3k/23.6k (Great Bay Coast) (tools/bench/README.md, "Fork baseline"). The XPROF slot 0 window runs from `Bench_BeginFrame` to `Bench_EndFrame` (src/code/bench.c L263-311). One frame there is one 20 Hz tick, a 50 ms window, and it likely counts misses from every thread that runs in it, audio included (inferred).
+- Inputs: the fork baseline gives I$/D$ misses per frame of 21.1k/20.3k (South Clock Town), 18.9k/21.6k (Termina Field), 16.6k/14.5k (Mountain Village), 21.3k/23.6k (Great Bay Coast) (`c05eaddb2^:tools/bench/README.md`, "Fork baseline"). The XPROF slot 0 window runs from `Bench_BeginFrame` to `Bench_EndFrame` (src/code/bench.c L263-311). One frame there is one 20 Hz tick, a 50 ms window, and it likely counts misses from every thread that runs in it, audio included (inferred).
 - I$: 21.1k x 54 cycles = 1.14 M cycles; / 93.75 MHz = 12.2 ms. Range over scenes and 49-61 cycles: 16.6k x 49 = 0.81 M = 8.7 ms, up to 21.3k x 61 = 1.30 M = 13.9 ms.
 - D$: 20.3k x 35-44 = 0.71-0.89 M cycles = 7.6-9.5 ms (SCT). Range: 14.5k x 35 = 5.4 ms (Mountain Village) to 23.6k x 44 = 11.1 ms (GBC). Dirty-line writebacks add more (the `dc_wb` column exists but the README does not report it).
 - Total stall per tick: about 14 ms (Mountain Village) to 25 ms (GBC). SCT is about 20 ms. Compare game ms 18-31 per tick. Even if half of these misses fall in other threads, stalls are plausibly a third or more of game-thread time (inferred).
@@ -1087,7 +1087,7 @@ Docs and pages:
 - https://www.techspot.com/community/topics/check-out-super-mario-64-running-at-60fps-in-widescreen-hd.247698/ (secondary)
 
 Local files read:
-- `Makefile` (HEAD `6d2e0053`), `tools/bench/README.md`, `src/code/bench.c` L255-368
+- `Makefile` (HEAD `6d2e0053`), `c05eaddb2^:tools/bench/README.md`, `src/code/bench.c` L255-368
 - `~/repos/ares/docs/spec/n64-timing.md` (fork HEAD `54f35f9c`)
 - `~/repos/oot-decomp/include/regs.h` (HEAD `14759abf`)
 
