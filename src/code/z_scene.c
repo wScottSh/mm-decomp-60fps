@@ -1,4 +1,7 @@
 #include "global.h"
+#if BENCH
+#include "bench.h"
+#endif
 
 /**
  * Spawn an object file of a specified ID that will persist through room changes.
@@ -90,7 +93,11 @@ void Object_UpdateEntries(ObjectContext* objectCtx) {
                     DmaMgr_RequestAsync(&entry->dmaReq, entry->segment, objectFile->vromStart, size, 0,
                                         &entry->loadQueue, NULL);
                 }
+#if BENCH
+            } else if (!Bench_DmaRecv(&entry->loadQueue, OS_MESG_NOBLOCK)) {
+#else
             } else if (!osRecvMesg(&entry->loadQueue, NULL, OS_MESG_NOBLOCK)) {
+#endif
                 entry->id = id;
             }
         }

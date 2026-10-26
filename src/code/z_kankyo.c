@@ -1,4 +1,7 @@
 #include "ultra64.h"
+#if BENCH
+#include "bench.h"
+#endif
 #include "z64light.h"
 #include "z64math.h"
 
@@ -1102,7 +1105,11 @@ void Environment_UpdateSkybox(u8 skyboxId, EnvironmentContext* envCtx, SkyboxCon
 
         if ((envCtx->skyboxDmaState == SKYBOX_DMA_TEXTURE1_START) ||
             (envCtx->skyboxDmaState == SKYBOX_DMA_TEXTURE2_START)) {
+#if BENCH
+            if (Bench_DmaRecv(&envCtx->loadQueue, OS_MESG_NOBLOCK) == 0) {
+#else
             if (osRecvMesg(&envCtx->loadQueue, NULL, 0) == 0) {
+#endif
                 envCtx->skyboxDmaState = SKYBOX_DMA_INACTIVE;
             }
         }

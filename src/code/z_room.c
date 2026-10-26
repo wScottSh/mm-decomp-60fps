@@ -1,4 +1,7 @@
 #include "global.h"
+#if BENCH
+#include "bench.h"
+#endif
 #include "PR/gs2dex.h"
 #include "libu64/debug.h"
 #include "sys_ucode.h"
@@ -605,7 +608,11 @@ s32 Room_RequestNewRoom(PlayState* play, RoomContext* roomCtx, s32 index) {
  */
 s32 Room_ProcessRoomRequest(PlayState* play, RoomContext* roomCtx) {
     if (roomCtx->status == 1) {
+#if BENCH
+        if (Bench_DmaRecv(&roomCtx->loadQueue, OS_MESG_NOBLOCK) == 0) {
+#else
         if (osRecvMesg(&roomCtx->loadQueue, NULL, OS_MESG_NOBLOCK) == 0) {
+#endif
             roomCtx->status = 0;
             roomCtx->curRoom.segment = roomCtx->roomRequestAddr;
             gSegments[0x03] = OS_K0_TO_PHYSICAL(roomCtx->curRoom.segment);

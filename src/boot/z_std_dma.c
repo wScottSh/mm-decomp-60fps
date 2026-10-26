@@ -19,6 +19,9 @@
  * to be uncompressed and the request queue and address translation is skipped.
  */
 #include "z64dma.h"
+#if BENCH
+#include "bench.h"
+#endif
 
 #include "carthandle.h"
 #include "fault.h"
@@ -277,6 +280,13 @@ s32 DmaMgr_RequestAsync(DmaRequest* req, void* ram, uintptr_t vrom, size_t size,
     req->notifyQueue = queue;
     req->notifyMsg = msg;
 
+#if BENCH
+    // bench.c is in code, which this function loads; Bench_Boot enables the clock after that.
+    if (gBenchCpuClock.enabled) {
+        Bench_DmaIssued(queue);
+    }
+#endif
+
     osSendMesg(&sDmaMgrMsgQueue, (OSMesg)req, OS_MESG_BLOCK);
 
     return 0;
@@ -305,6 +315,11 @@ s32 DmaMgr_RequestSync(void* ram, uintptr_t vrom, size_t size) {
     }
 
     osRecvMesg(&queue, NULL, OS_MESG_BLOCK);
+#if BENCH
+    if (gBenchCpuClock.enabled) {
+        Bench_DmaDone(&queue);
+    }
+#endif
 
     return 0;
 }
