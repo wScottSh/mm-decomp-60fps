@@ -335,18 +335,24 @@ def run_scene(rom, symbols, runner, scene, out, noise_pin, load_pin, dump_frames
         summary["load_totals"] = totals(name, peeks, "load_", LOAD_TOTALS)
     noise = ""
     if noise_pin:
-        totals = noise_totals(name, peeks)
-        summary |= {"noise_totals": totals, "noise_cmds_per_keyframe_max": max(
+        noise_sum = noise_totals(name, peeks)
+        summary |= {"noise_totals": noise_sum, "noise_cmds_per_keyframe_max": max(
             (k["noise_cmds"] for k in keyframes), default=0), "noise_patched_in_window": sum(
             k["noise_patched"] for k in keyframes)}
-        noise = (f"; noise pin: {totals['walks']} walks since boot, {totals['visited']} commands visited, "
-                 f"{totals['commands']} noise commands, {totals['patched']} patched, unresolved "
-                 f"{totals['unresolved']}, unknown {totals['unknown']}, overflow {totals['overflow']}, mismatch "
-                 f"{totals['mismatch']}")
+        noise = (f"; noise pin: {noise_sum['walks']} walks since boot, {noise_sum['visited']} commands visited, "
+                 f"{noise_sum['commands']} noise commands, {noise_sum['patched']} patched, unresolved "
+                 f"{noise_sum['unresolved']}, unknown {noise_sum['unknown']}, overflow {noise_sum['overflow']}, mismatch "
+                 f"{noise_sum['mismatch']}")
+    loads = ""
+    if load_pin:
+        t = summary["load_totals"]
+        loads = (f"; load pin: {t['dma_polls']} DMA polls ({t['dma_held']} held, {t['dma_waited']} waited, untracked "
+                 f"{t['dma_untracked']}, overflow {t['dma_overflow']}), {t['audio_waits']} of "
+                 f"{t['audio_barriers']} audio barriers waited")
     (scene_dir / "summary.json").write_text(json.dumps(summary, indent=1) + "\n")
     summary["load"] = load.analyze(name, peeks, marks["window"], window, stats_rows, scene_dir, write_tsv)
     print(f"{name}: measured {summary['fields']} fields, {summary['images']} images, {summary['ticks']} ticks "
-          f"({wall[0]:.1f} s){noise}", flush=True)
+          f"({wall[0]:.1f} s){noise}{loads}", flush=True)
     bad = [k for k in NOISE_MUST_BE_ZERO if noise_pin and summary["noise_totals"][k]]
     if bad:
         raise SystemExit(f"{name}: the noise pin's walk did not cover the display lists: "
