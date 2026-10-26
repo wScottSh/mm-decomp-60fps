@@ -192,8 +192,8 @@ typedef struct BenchNoiseTotals {
  */
 typedef struct BenchLoadTotals {
     u32 dmaPolls;     // Bench_DmaRecv calls
-    u32 dmaHeld;      // polls in the tick that issued the request, answered "not done"
-    u32 dmaWaited;    // polls of an earlier tick's request, which waited for it
+    u32 dmaHeld;      // first polls in the tick that issued the request, answered "not done"
+    u32 dmaWaited;    // later polls, which took the transfer (waiting for it if it was still running)
     u32 dmaUntracked; // polls of a queue with no issue record, answered as retail does: the pin did not hold
     u32 dmaOverflow;  // records of this tick's requests that the full issue table dropped
     u32 audioBarriers; // ticks that checked the audio thread had applied the previous tick's commands

@@ -959,8 +959,9 @@ void Bench_PinNoise(CfbInfo* cfb, Gfx* taskList) {
  * the audio thread derives from its commands, so the tick at which logic sees a load finish depends on DMA,
  * audio and CPU timing (docs/fps60/architecture.md, risk R4). With the pin set, both depend only on ticks:
  *
- *  - A DMA request issued during tick t is "not done" to every poll in tick t and "done" to every poll after
- *    it; a poll after tick t waits for the transfer.
+ *  - A DMA request issued during tick t is "not done" to the first poll of its queue in tick t and "done" to
+ *    every later poll, which waits for the transfer. A second poll in tick t is a wait loop (Play_Init spins on
+ *    Room_ProcessRoomRequest), which retail also leaves only once the transfer is done.
  *  - Before Audio_Update reads audio state, the audio thread has applied every command the previous tick's
  *    Audio_Update sent (sequence starts, sync sequence and font loads included).
  *
@@ -972,6 +973,7 @@ void Bench_PinNoise(CfbInfo* cfb, Gfx* taskList) {
 typedef struct BenchDmaIssue {
     OSMesgQueue* queue; // NULL for an empty slot
     u32 tick;
+    s32 polled; // polled in its issue tick
 } BenchDmaIssue;
 
 static BenchDmaIssue sBenchDmaIssues[BENCH_DMA_ISSUES];
@@ -1016,6 +1018,7 @@ void Bench_DmaIssued(OSMesgQueue* queue) {
     }
     issue->queue = queue;
     issue->tick = gBenchProbe.tick;
+    issue->polled = false;
     __osRestoreInt(mask);
 }
 
@@ -1047,7 +1050,8 @@ s32 Bench_DmaRecv(OSMesgQueue* queue, s32 flag) {
         gBenchProbe.load.dmaUntracked++;
         return osRecvMesg(queue, NULL, OS_MESG_NOBLOCK);
     }
-    if ((flag == OS_MESG_NOBLOCK) && (issue->tick == gBenchProbe.tick)) {
+    if ((flag == OS_MESG_NOBLOCK) && (issue->tick == gBenchProbe.tick) && !issue->polled) {
+        issue->polled = true;
         gBenchProbe.load.dmaHeld++;
         return -1;
     }
