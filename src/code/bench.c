@@ -55,9 +55,14 @@ static s32 sBenchSawFade = false;
 static OSContPad sBenchPad;
 static char sBenchLine[256];
 
-static BenchField sBenchFields[BENCH_FIELD_RING];
+// The harness reads the rings with runner peeks, which can see a record's cache lines in different
+// states (measured: one stale 16-byte line between two new ones). Only uncached KSEG1 aliases of the
+// rings are written, and their cached lines are flushed once at boot.
+static BenchField sBenchFieldRing[BENCH_FIELD_RING];
+static BenchTick sBenchTickRing[BENCH_TICK_RING];
+static volatile BenchField* sBenchFields;
+static volatile BenchTick* sBenchTicks;
 static u32 sBenchFieldSeq = 0;
-static BenchTick sBenchTicks[BENCH_TICK_RING];
 static u32 sBenchActorTime[2 * ACTOR_ID_MAX];
 static u32 sBenchActorBegin;
 
@@ -366,7 +371,7 @@ void Bench_FieldSnapshot(void) {
  */
 static void Bench_TickBoundary(void) {
     BenchTick now;
-    BenchTick* rec;
+    volatile BenchTick* rec;
     OSIntMask mask = __osDisableInt();
     s32 i;
 
@@ -378,7 +383,7 @@ static void Bench_TickBoundary(void) {
 
         rec = &sBenchTicks[gBenchProbe.tick % BENCH_TICK_RING];
         // The harness may read the ring at any instruction: a record is valid once its tick is stored last
-        *(volatile u32*)&rec->tick = BENCH_RECORD_WRITING;
+        rec->tick = BENCH_RECORD_WRITING;
         rec->start = from->start;
         rec->wall = (now.start - from->start) * 2;
         rec->switches = now.switches - from->switches;
@@ -401,7 +406,7 @@ static void Bench_TickBoundary(void) {
         for (i = 0; i < BENCH_SYS_MAX; i++) {
             rec->sys[i] = sBenchSys[i];
         }
-        *(volatile u32*)&rec->tick = gBenchProbe.tick;
+        rec->tick = gBenchProbe.tick;
         gBenchProbe.tickCount++;
     }
     sBenchTickStart = now;
@@ -424,8 +429,14 @@ s32 Bench_Boot(GameState* gameState) {
     gBenchProbe.curBuf = &gScheduler.curBuf;
     gBenchProbe.cfbs = sGraphCfbInfos;
     gBenchProbe.cfbSize = sizeof(CfbInfo);
-    gBenchProbe.fields = sBenchFields;
-    gBenchProbe.ticks = sBenchTicks;
+    osWritebackDCache(sBenchFieldRing, sizeof(sBenchFieldRing));
+    osInvalDCache(sBenchFieldRing, sizeof(sBenchFieldRing));
+    osWritebackDCache(sBenchTickRing, sizeof(sBenchTickRing));
+    osInvalDCache(sBenchTickRing, sizeof(sBenchTickRing));
+    sBenchFields = (volatile BenchField*)K0_TO_K1(sBenchFieldRing);
+    sBenchTicks = (volatile BenchTick*)K0_TO_K1(sBenchTickRing);
+    gBenchProbe.fields = (BenchField*)sBenchFields;
+    gBenchProbe.ticks = (BenchTick*)sBenchTicks;
     gBenchProbe.actorTime = sBenchActorTime;
     gBenchProbe.layout = (sizeof(BenchField) << 24) | (BENCH_FIELD_RING << 20) | (sizeof(BenchTick) << 10) | BENCH_TICK_RING;
     gBenchProbe.actorIds = ACTOR_ID_MAX;
