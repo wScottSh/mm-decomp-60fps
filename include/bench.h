@@ -55,9 +55,33 @@ typedef struct BenchConfig {
     u32 retraceTicks; // the gIrqMgrRetraceTime that the pinned effect budget uses
     u32 inputCount;   // clamped to BENCH_MAX_INPUTS
     BenchInput inputs[BENCH_MAX_INPUTS];
+    u32 noisePin;     // nonzero: Bench_PinNoise neutralizes RDP noise in every gfx task (fidelity runs)
 } BenchConfig;
 
 extern BenchConfig gBenchConfig;
+
+/**
+ * The noise pin's walk of one gfx task's display lists (Bench_PinNoise). A noise command is a
+ * G_SETOTHERMODE_H/L, G_RDPSETOTHERMODE or G_SETCOMBINE that selects G_CD_NOISE, G_AD_NOISE, G_AC_DITHER
+ * or the combiner's NOISE input.
+ */
+typedef struct BenchNoiseRecord {
+    u32 hash;     // FNV-1a over both words of every noise command as the game wrote it, in walk order
+    u32 commands; // noise commands the walk met
+    u32 patched;  // of those, the ones this walk rewrote; the others an earlier walk rewrote
+    u32 visited;  // display-list commands the walk visited
+} BenchNoiseRecord;
+
+// Since boot, over every walk
+typedef struct BenchNoiseTotals {
+    u32 walks;
+    u32 visited;
+    u32 commands;
+    u32 patched;
+    u32 unresolved; // G_DL, G_BRANCH_Z targets outside RDRAM or in a segment that was never set
+    u32 unknown;    // opcodes the walker cannot follow, and noise fields a partial othermode write leaves undecided
+    u32 overflow;   // walks cut short by the call stack or the visit cap, and patches the log had no room for
+} BenchNoiseTotals;
 
 /**
  * What the fps60 harness reads between VI fields (tools/fps60/README.md). The layout is the harness
@@ -73,6 +97,8 @@ typedef struct BenchProbe {
     /* 0x18 */ CfbInfo* cfbs;         // sGraphCfbInfos
     /* 0x1C */ u32 cfbSize;     // sizeof(CfbInfo)
     /* 0x20 */ u32 cfbTick[3];  // the tick whose image each sGraphCfbInfos entry holds
+    /* 0x2C */ BenchNoiseRecord cfbNoise[3]; // that tick's noise-pin walk, zero with the pin off
+    /* 0x5C */ BenchNoiseTotals noise;
 } BenchProbe;
 
 extern BenchProbe gBenchProbe;
@@ -83,6 +109,7 @@ void Bench_MarkGameStart(struct GameState* gameState);
 void Bench_MarkGameEnd(struct GameState* gameState);
 void Bench_EndFrame(struct GraphicsContext* gfxCtx, struct GameState* gameState);
 void Bench_TagCfb(CfbInfo* cfb);
+void Bench_PinNoise(CfbInfo* cfb, Gfx* taskList);
 void Bench_ApplyInput(struct GameState* gameState);
 
 // bench_emux.s

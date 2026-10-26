@@ -39,6 +39,16 @@ PROBE_MAGIC_OFF, PROBE_TICK, PROBE_DIVISOR, PROBE_SETTLED, PROBE_SETTLE_TICK = 0
 PROBE_CUR_BUF, PROBE_CFBS, PROBE_CFB_SIZE, PROBE_CFB_TICK = 0x14, 0x18, 0x1C, 0x20
 CFB_COUNT = 3
 
+# The noise pin (Bench_PinNoise, src/code/bench.c): BenchConfig.noisePin, BenchProbe.cfbNoise[CFB_COUNT]
+# (BenchNoiseRecord, parallel to cfbTick) and BenchProbe.noise (BenchNoiseTotals).
+NOISE_PIN_SYMBOL = "Bench_PinNoise"
+CFG_NOISE_PIN = CFG_INPUTS + 8 * MAX_INPUTS
+PROBE_CFB_NOISE, NOISE_RECORD_SIZE = 0x2C, 16
+NOISE_RECORD = ["noise_hash", "noise_cmds", "noise_patched", "dl_cmds"]
+PROBE_NOISE_TOTALS = 0x5C
+NOISE_TOTALS = ["walks", "visited", "commands", "patched", "unresolved", "unknown", "overflow"]
+NOISE_MUST_BE_ZERO = ["unresolved", "unknown", "overflow"]
+
 # Optional: u32 gBenchCfbKeyframe[CFB_COUNT], nonzero when that CfbInfo's image is its tick's final
 # image. A build without it presents one image per tick, so every image is a keyframe.
 KEYFRAME_SYMBOL = "gBenchCfbKeyframe"
@@ -65,7 +75,7 @@ def read_map(path):
     return symbols
 
 
-def patch_rom(rom, scene):
+def patch_rom(rom, scene, noise_pin):
     data = bytearray(rom)
     at = data.find(struct.pack(">I", CONFIG_MAGIC))
     if at < 0 or data.find(struct.pack(">I", CONFIG_MAGIC), at + 1) >= 0:
@@ -77,13 +87,15 @@ def patch_rom(rom, scene):
         raise SystemExit(f"{scene['name']}: inputs are not sorted by tick")
     struct.pack_into(">5I", data, at + CFG_SCENE, corpus.BOOT[scene["boot"]], 0, 0, SEED, FLAG_PIN_EFFECT_BUDGET)
     struct.pack_into(">I", data, at + CFG_INPUT_COUNT, len(inputs))
+    if noise_pin:
+        struct.pack_into(">I", data, at + CFG_NOISE_PIN, 1)
     for n, (tick, buttons, x, y) in enumerate(inputs):
         struct.pack_into(">HHbbH", data, at + CFG_INPUTS + 8 * n, tick, buttons, x, y, 0)
     retrace = struct.unpack_from(">I", data, at + CFG_RETRACE)[0]
     return bytes(data), retrace
 
 
-def script(symbols, window):
+def script(symbols, window, noise_pin):
     probe = symbols["gBenchProbe"]
     keyframe = symbols.get(KEYFRAME_SYMBOL)
 
@@ -99,7 +111,12 @@ def script(symbols, window):
     per_field += [f"peek c{i} {a(PROBE_CFB_TICK + 4 * i)} w" for i in range(CFB_COUNT)]
     if keyframe is not None:
         per_field += [f"peek k{i} 0x{keyframe + 4 * i:08X} w" for i in range(CFB_COUNT)]
-    return steps + per_field * window + ["stop"]
+    end = []
+    if noise_pin:
+        per_field += [f"peek n{i}_{k} {a(PROBE_CFB_NOISE + NOISE_RECORD_SIZE * i + 4 * j)} w"
+                      for i in range(CFB_COUNT) for j, k in enumerate(NOISE_RECORD)]
+        end = [f"peek total_{k} {a(PROBE_NOISE_TOTALS + 4 * j)} w" for j, k in enumerate(NOISE_TOTALS)]
+    return steps + per_field * window + end + ["stop"]
 
 
 def run_runner(runner, rom_bytes, steps, scene_dir, dump_frames=()):
@@ -148,7 +165,7 @@ def read_stats(path):
     return [dict(zip(header, l.split("\t"))) for l in lines[1:]]
 
 
-def per_field(name, stats, marks, peeks, window, has_keyframe):
+def per_field(name, stats, marks, peeks, window, has_keyframe, noise_pin):
     if "window" not in marks:
         raise SystemExit(f"{name}: no window mark")
     start = marks["window"]
@@ -164,6 +181,7 @@ def per_field(name, stats, marks, peeks, window, has_keyframe):
         p = peeks.get(frame + 1)
         need = ["tick", "div", "cur", "fb"] + [f"c{k}" for k in range(CFB_COUNT)]
         need += [f"k{k}" for k in range(CFB_COUNT)] if has_keyframe else []
+        need += [f"n{k}_{f}" for k in range(CFB_COUNT) for f in NOISE_RECORD] if noise_pin else []
         if p is None or any(k not in p for k in need):
             raise SystemExit(f"{name}: missing peeks for window field {i} (frame {frame})")
         index, rem = divmod(p["cur"] - cfbs, cfb_size)
@@ -180,7 +198,8 @@ def per_field(name, stats, marks, peeks, window, has_keyframe):
             "field": i, "frame": frame, "origin": stats[frame]["origin"], "fb_hash": stats[frame]["fb_hash"],
             "tick": p["tick"], "image_tick": p[f"c{index}"],
             "keyframe": int(p[f"k{index}"] != 0) if has_keyframe else 1, "divisor": p["div"],
-        })
+        } | ({f: (f"{p[f'n{index}_{f}']:08X}" if f == "noise_hash" else p[f"n{index}_{f}"]) for f in NOISE_RECORD}
+             if noise_pin else {}))
     return rows, static["settle_tick"]
 
 
@@ -190,13 +209,14 @@ def images(rows):
     out = []
     for a, b in zip(changes, changes[1:]):
         span = rows[a:b]
-        tags = {(r["image_tick"], r["keyframe"]) for r in span}
+        tags = {(r["image_tick"], r["keyframe"]) + tuple(r.get(f) for f in NOISE_RECORD) for r in span}
         if len(tags) != 1:
             raise SystemExit(f"field {a}: one image carries two tick tags {sorted(tags)}")
         out.append({"first_field": a, "fields": b - a, "image_tick": span[0]["image_tick"],
                     "keyframe": span[0]["keyframe"], "fb_hash": span[-1]["fb_hash"],
                     "final_frame": span[-1]["frame"],
-                    "hash_changes": sum(1 for x, y in zip(span, span[1:]) if x["fb_hash"] != y["fb_hash"])})
+                    "hash_changes": sum(1 for x, y in zip(span, span[1:]) if x["fb_hash"] != y["fb_hash"])}
+                   | {f: span[0][f] for f in NOISE_RECORD if f in span[0]})
     return out
 
 
@@ -246,12 +266,13 @@ def write_tsv(path, rows, keys=None):
     Path(path).write_text("\t".join(keys) + "\n" + "".join("\t".join(str(r[k]) for k in keys) + "\n" for r in rows))
 
 
-def run_scene(rom, symbols, runner, scene, out, dump_frames=()):
+def run_scene(rom, symbols, runner, scene, out, noise_pin, dump_frames=()):
     name = scene["name"]
     scene_dir = out / name
-    rom_bytes, retrace = patch_rom(rom, scene)
+    rom_bytes, retrace = patch_rom(rom, scene, noise_pin)
     window = scene.get("window", corpus.WINDOW)
-    stdout, events, host, wall = run_runner(runner, rom_bytes, script(symbols, window), scene_dir, dump_frames)
+    stdout, events, host, wall = run_runner(runner, rom_bytes, script(symbols, window, noise_pin), scene_dir,
+                                            dump_frames)
     (scene_dir / "guest.txt").write_text(stdout)
     (scene_dir / "events.txt").write_text("\n".join(events) + "\n")
     (scene_dir / "host.txt").write_text("\n".join(host) + "\n")
@@ -260,11 +281,12 @@ def run_scene(rom, symbols, runner, scene, out, dump_frames=()):
         raise SystemExit(f"{name}: the ROM booted {m.group(2) if m else 'nothing'}, not {scene['boot']}")
     marks, peeks = parse_events(events)
     rows, settle_tick = per_field(name, read_stats(scene_dir / "stats.tsv"), marks, peeks, window,
-                                  KEYFRAME_SYMBOL in symbols)
+                                  KEYFRAME_SYMBOL in symbols, noise_pin)
     imgs, tks = images(rows), ticks(rows)
     write_tsv(scene_dir / "fields.tsv", rows)
     keyframes = [i for i in imgs if i["keyframe"]]
     keys = ["image_tick", "first_field", "fields", "final_frame", "fb_hash", "hash_changes"]
+    keys += NOISE_RECORD if noise_pin else []
     if keyframes:
         write_tsv(scene_dir / "keyframes.tsv", keyframes, keys)
     else:
@@ -272,11 +294,33 @@ def run_scene(rom, symbols, runner, scene, out, dump_frames=()):
     if tks:
         write_tsv(scene_dir / "ticks.tsv", tks)
     summary = {"scene": name, "boot": scene["boot"], "window_start_frame": marks["window"],
-               "settle_tick": settle_tick, "retrace_ticks": retrace, **summarize(rows, imgs, tks)}
+               "settle_tick": settle_tick, "retrace_ticks": retrace, **summarize(rows, imgs, tks),
+               "noise_pin": noise_pin}
+    noise = ""
+    if noise_pin:
+        totals = noise_totals(name, peeks)
+        summary |= {"noise_totals": totals, "noise_cmds_per_keyframe_max": max(
+            (k["noise_cmds"] for k in keyframes), default=0), "noise_patched_in_window": sum(
+            k["noise_patched"] for k in keyframes)}
+        noise = (f"; noise pin: {totals['walks']} walks since boot, {totals['visited']} commands visited, "
+                 f"{totals['commands']} noise commands, {totals['patched']} patched, unresolved "
+                 f"{totals['unresolved']}, unknown {totals['unknown']}, overflow {totals['overflow']}")
     (scene_dir / "summary.json").write_text(json.dumps(summary, indent=1) + "\n")
     print(f"{name}: measured {summary['fields']} fields, {summary['images']} images, {summary['ticks']} ticks "
-          f"({wall[0]:.1f} s)", flush=True)
+          f"({wall[0]:.1f} s){noise}", flush=True)
+    bad = [k for k in NOISE_MUST_BE_ZERO if noise_pin and summary["noise_totals"][k]]
+    if bad:
+        raise SystemExit(f"{name}: the noise pin's walk did not cover the display lists: "
+                         + ", ".join(f"{k} {summary['noise_totals'][k]}" for k in bad))
     return summary, wall
+
+
+def noise_totals(name, peeks):
+    """BenchProbe.noise as peeked after the window."""
+    last = peeks[max(peeks)]
+    if any(f"total_{k}" not in last for k in NOISE_TOTALS):
+        raise SystemExit(f"{name}: missing the noise-pin totals peeks")
+    return {k: last[f"total_{k}"] for k in NOISE_TOTALS}
 
 
 SUMMARY_COLS = ["scene", "fields", "images", "image_share_at_1", "image_fields_max", "ticks", "lag_ticks",
@@ -314,6 +358,8 @@ def main():
     p.add_argument("--scenes", default=",".join(s["name"] for s in corpus.SCENES))
     p.add_argument("--jobs", type=int, default=MAX_JOBS)
     p.add_argument("--runner", type=Path, default=Path(os.environ.get("N64_RUN", RUNNER)))
+    p.add_argument("--no-noise-pin", dest="noise_pin", action="store_false",
+                   help="retail RDP noise, for perf runs; fidelity runs keep the pin (README, Noise pin)")
     p.add_argument("--check-determinism", action="store_true",
                    help="run twice into OUT/run1 and OUT/run2; fail unless every output but wall time matches")
     args = p.parse_args()
@@ -328,6 +374,9 @@ def main():
 
     runner_digest = check_runner(args.runner)
     rom, symbols = load_rom(args.rom, map_path)
+    if args.noise_pin and NOISE_PIN_SYMBOL not in symbols:
+        raise SystemExit(f"{map_path}: no {NOISE_PIN_SYMBOL}; this ROM predates the noise pin, run it with "
+                         "--no-noise-pin")
     if not args.check_determinism:
         measure(args, map_path, names, by_name, runner_digest, rom, symbols, args.out)
         return
@@ -354,13 +403,14 @@ def measure(args, map_path, names, by_name, runner_digest, rom, symbols, out):
     meta = {"rom": str(args.rom.resolve()), "rom_sha256": sha256(args.rom), "map": str(map_path.resolve()),
             "map_sha256": sha256(map_path), "runner": str(args.runner), "runner_sha256": runner_digest,
             "gBenchProbe": f"0x{symbols['gBenchProbe']:08X}", "keyframe_symbol": KEYFRAME_SYMBOL in symbols,
-            "scenes": names}
+            "noise_pin": args.noise_pin, "scenes": names}
     (out / "meta.json").write_text(json.dumps(meta, indent=1) + "\n")
 
     load_before = os.getloadavg()[0]
     began = time.perf_counter()
     with ThreadPoolExecutor(max_workers=args.jobs) as pool:
-        futures = {n: pool.submit(run_scene, rom, symbols, args.runner, by_name[n], out) for n in names}
+        futures = {n: pool.submit(run_scene, rom, symbols, args.runner, by_name[n], out, args.noise_pin)
+                   for n in names}
         results = {n: f.result() for n, f in futures.items()}
     total = time.perf_counter() - began
 
