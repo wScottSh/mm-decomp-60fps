@@ -13,14 +13,14 @@ MAGIC = 0x41554449  # BENCH_AUDIO_MAGIC, include/bench.h
 BENCH_CONFIG_MAGIC = 0x424E4348
 
 # BenchAudioConfig.pin
-HASH, PIN_CMDS, PIN_AI, PIN_RANDOM, PIN_LOADS = 1, 2, 4, 8, 16
-PIN = {"off": 0, "hash": HASH, "on": HASH | PIN_CMDS | PIN_AI | PIN_RANDOM | PIN_LOADS}
+HASH, PIN_CMDS, PIN_AI, PIN_RANDOM, PIN_LOADS, PIN_DMA = 1, 2, 4, 8, 16, 32
+PIN = {"off": 0, "hash": HASH, "on": HASH | PIN_CMDS | PIN_AI | PIN_RANDOM | PIN_LOADS | PIN_DMA}
 
 # BenchAudio and BenchAudioFrame layouts
 HEADER = ["magic", "frames", "anchor", "ring", "layout", "send_refused", "tag_overflow", "graph_waits",
           "audio_waits", "reset_frames", "ai_dropped"]
 RING_OFF = 0x0C
-FRAME_WORDS = ["frame", "retrace", "tick", "len", "hash", "ai_len", "ai_used", "due"]
+FRAME_WORDS = ["frame", "retrace", "tick", "len", "hash", "ai_len", "ai_used", "due", "cmds", "cmd_hash"]
 RING = 1024
 WRITING = 0xFFFFFFFF
 # A refused or untagged batch, or a buffer the AI model dropped, means the pin did not hold
@@ -85,6 +85,7 @@ def analyze(name, peeks, pin, out_dir, write_tsv):
     for r in rows:
         r["rel"] = r["frame"] - head["anchor"]
         r["hash"] = f"{r['hash']:08X}"
+        r["cmd_hash"] = f"{r['cmd_hash']:08X}"
     keys = ["rel"] + FRAME_WORDS
     if rows:
         write_tsv(out_dir / "audio.tsv", rows, keys)

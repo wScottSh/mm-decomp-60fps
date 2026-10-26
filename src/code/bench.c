@@ -976,6 +976,9 @@ void Bench_PinNoise(CfbInfo* cfb, Gfx* taskList) {
  *    uses a fixed sequence and a fixed noise table.
  *  - Async loads. A chunk is polled each frame (load.c, AudioLoad_ProcessAsyncLoad), so it lands on the
  *    frame after its DMA ends. BENCH_AUDIO_PIN_LOADS waits for the DMA on the first poll.
+ *  - Sample DMAs. A frame's synthesis starts DMAs of sample data that its RSP task reads, and waits for
+ *    them only at the start of the next frame, after AudioMgr has sent that task. So the task reads
+ *    whatever part of the data has landed. BENCH_AUDIO_PIN_DMA waits at the end of the frame instead.
  *
  * Bench_AudioSubmit hashes each buffer as osAiSetNextBuffer receives it, read through KSEG1: RDRAM is
  * what the AI's DMA plays. AudioMgr waited for the RSP task that wrote it in the previous frame.
@@ -1003,6 +1006,8 @@ static u32 sBenchAudioTagHead = 0;
 static u32 sBenchAudioTagCount = 0;
 static u32 sBenchAudioAiFifo[2]; // AI model: samples << 10 left in the playing and the queued buffer
 static u32 sBenchAudioCount = 0x12345678;
+static u32 sBenchAudioCmds[3]; // per AI buffer: commands processed in the frame that synthesized it
+static u32 sBenchAudioCmdHash[3];
 static s16 sBenchAudioNoise[0x2000];
 
 static void Bench_AudioInit(void) {
@@ -1053,10 +1058,21 @@ void Bench_AudioFrameBegin(void) {
     }
     sBenchAudioFrame = frame;
     sBenchAudioAiLen = sBenchAudioAiUsed = 0;
+    // AudioThread_UpdateImpl synthesizes into aiBuffers[(curAiBufferIndex + 1) % 3]
+    sBenchAudioCmds[(gAudioCtx.curAiBufferIndex + 1) % 3] = 0;
+    sBenchAudioCmdHash[(gAudioCtx.curAiBufferIndex + 1) % 3] = BENCH_FNV_OFFSET;
     gBenchAudio.frames = frame + 1;
 }
 
 void Bench_AudioFrameEnd(void) {
+    // AudioThread_UpdateImpl itself takes these at the start of the next frame, after AudioMgr has sent
+    // the task that reads them
+    if (Bench_AudioPinned(BENCH_AUDIO_PIN_DMA)) {
+        while (gAudioCtx.curAudioFrameDmaCount != 0) {
+            osRecvMesg(&gAudioCtx.curAudioFrameDmaQueue, NULL, OS_MESG_BLOCK);
+            gAudioCtx.curAudioFrameDmaCount--;
+        }
+    }
     sBenchAudioDone = sBenchAudioFrame + 1;
     osSendMesg(&sBenchGraphGate, NULL, OS_MESG_NOBLOCK);
 }
@@ -1126,6 +1142,13 @@ void Bench_AudioCmdsSent(s32 sent) {
         sBenchAudioTagCount++;
     }
     __osRestoreInt(mask);
+}
+
+void Bench_AudioCmd(u32 opArgs, u32 data) {
+    u32 i = gAudioCtx.curAiBufferIndex;
+
+    sBenchAudioCmds[i]++;
+    sBenchAudioCmdHash[i] = (((sBenchAudioCmdHash[i] ^ opArgs) * BENCH_FNV_PRIME) ^ data) * BENCH_FNV_PRIME;
 }
 
 /**
@@ -1203,6 +1226,12 @@ void Bench_AudioSubmit(void* buf, u32 size) {
     rec->aiLen = sBenchAudioAiLen;
     rec->aiUsed = sBenchAudioAiUsed;
     rec->due = sBenchAudioNextDue;
+    for (i = 0; i < ARRAY_COUNT(gAudioCtx.aiBuffers); i++) {
+        if (gAudioCtx.aiBuffers[i] == buf) {
+            rec->cmds = sBenchAudioCmds[i];
+            rec->cmdHash = sBenchAudioCmdHash[i];
+        }
+    }
     rec->frame = sBenchAudioFrame;
 }
 

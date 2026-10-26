@@ -253,7 +253,7 @@ void Bench_EmuxExit(void);
 #define BENCH_AUDIO_PIN_AI (1 << 2)      // osAiGetLength comes from a model of the AI, not the clock
 #define BENCH_AUDIO_PIN_RANDOM (1 << 3)  // audio randomness and the noise wave do not read osGetCount or code
 #define BENCH_AUDIO_PIN_LOADS (1 << 4)   // an async load's chunk is done on the frame after it was started
-#define BENCH_AUDIO_PIN_ALL 0x1F
+#define BENCH_AUDIO_PIN_DMA (1 << 5)     // a frame's sample DMAs are done before its RSP task can start
 
 typedef struct BenchAudioConfig {
     u32 magic;
@@ -270,8 +270,10 @@ typedef struct BenchAudioFrame {
     /* 0x10 */ u32 hash;    // FNV-1a over the buffer's words
     /* 0x14 */ u32 aiLen;   // osAiGetLength() this frame
     /* 0x18 */ u32 aiUsed;  // the length the frame computed its size from (the model's with the AI pin)
-    /* 0x1C */ u32 due;     // the due frame of the latest tick whose commands this frame may process
-} BenchAudioFrame; // size = 0x20
+    /* 0x1C */ u32 due;     // with BENCH_AUDIO_PIN_CMDS, frames before this one may run
+    /* 0x20 */ u32 cmds;    // audio commands processed two frames before, when this buffer was synthesized
+    /* 0x24 */ u32 cmdHash; // FNV-1a over their two words
+} BenchAudioFrame; // size = 0x28
 
 #define BENCH_AUDIO_RING 1024
 
@@ -301,6 +303,7 @@ u32 Bench_AudioAiLength(u32 aiLen);
 void Bench_AudioSubmit(void* buf, u32 size);
 s32 Bench_AudioCmdsDue(void);
 void Bench_AudioCmdsSent(s32 sent);
+void Bench_AudioCmd(u32 opArgs, u32 data);
 u32 Bench_AudioRandom(u32 random, u32 taskCount);
 s16* Bench_AudioNoiseWave(u32 random);
 u32 Bench_AudioCount(u32 count);

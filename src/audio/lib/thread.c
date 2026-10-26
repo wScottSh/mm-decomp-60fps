@@ -546,6 +546,9 @@ void AudioThread_ProcessCmds(u32 msg) {
             break;
         }
 
+#if BENCH
+        Bench_AudioCmd(cmd->opArgs, cmd->asUInt);
+#endif
         AudioThread_ProcessCmd(cmd);
         cmd->op = AUDIOCMD_OP_NOOP;
     }
