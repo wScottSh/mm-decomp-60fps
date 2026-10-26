@@ -44,6 +44,33 @@
 #include "macros.h"
 #include "z64game.h"
 #include "z64skin_matrix.h"
+void C02_Enter(s32 slot);
+void C02_Exit(s32 slot);
+void C02_Matrix_Mult(MtxF* mf, MatrixMode mode);
+void C02_Matrix_Translate(f32 x, f32 y, f32 z, MatrixMode mode);
+void C02_Matrix_Scale(f32 x, f32 y, f32 z, MatrixMode mode);
+void C02_Matrix_RotateXS(s16 x, MatrixMode mode);
+void C02_Matrix_RotateXF(f32 x, MatrixMode mode);
+void C02_Matrix_RotateXFApply(f32 x);
+void C02_Matrix_RotateXFNew(f32 x);
+void C02_Matrix_RotateYS(s16 y, MatrixMode mode);
+void C02_Matrix_RotateYF(f32 y, MatrixMode mode);
+void C02_Matrix_RotateZS(s16 z, MatrixMode mode);
+void C02_Matrix_RotateZF(f32 z, MatrixMode mode);
+void C02_Matrix_RotateZYX(s16 x, s16 y, s16 z, MatrixMode mode);
+void C02_Matrix_TranslateRotateZYX(Vec3f* translation, Vec3s* rot);
+void C02_Matrix_SetTranslateRotateYXZ(f32 x, f32 y, f32 z, Vec3s* rot);
+Mtx* C02_Matrix_MtxFToMtx(MtxF* src, Mtx* dest);
+void C02_Matrix_MultVec3f(Vec3f* src, Vec3f* dest);
+void C02_Matrix_MultVec3fXZ(Vec3f* src, Vec3f* dest);
+void C02_Matrix_MtxFCopy(MtxF* dest, MtxF* src);
+void C02_Matrix_MtxToMtxF(Mtx* src, MtxF* dest);
+void C02_Matrix_MultVec3fExt(Vec3f* src, Vec3f* dest, MtxF* mf);
+void C02_Matrix_ReplaceRotation(MtxF* mf);
+void C02_Matrix_MtxFToYXZRot(MtxF* src, Vec3s* dest, s32 nonUniformScale);
+void C02_Matrix_MtxFToZYXRot(MtxF* src, Vec3s* dest, s32 nonUniformScale);
+void C02_Matrix_RotateAxisF(f32 angle, Vec3f* axis, MatrixMode mode);
+void C02_Matrix_RotateAxisS(s16 angle, Vec3f* axis, MatrixMode mode);
 
 /* data */
 
@@ -148,7 +175,7 @@ MtxF* Matrix_GetCurrent(void) {
  *
  * @remark original name: "Matrix_mult"
  */
-void Matrix_Mult(MtxF* mf, MatrixMode mode) {
+void C02_Matrix_Mult(MtxF* mf, MatrixMode mode) {
     MtxF* cmf = Matrix_GetCurrent();
 
     if (mode == MTXMODE_APPLY) {
@@ -181,7 +208,7 @@ void Matrix_Mult(MtxF* mf, MatrixMode mode) {
  *
  * @remark original name: "Matrix_translate"
  */
-void Matrix_Translate(f32 x, f32 y, f32 z, MatrixMode mode) {
+void C02_Matrix_Translate(f32 x, f32 y, f32 z, MatrixMode mode) {
     MtxF* cmf = sCurrentMatrix;
     f32 tempX;
     f32 tempY;
@@ -227,7 +254,7 @@ void Matrix_Translate(f32 x, f32 y, f32 z, MatrixMode mode) {
  *
  * @remark original name: "Matrix_scale"
  */
-void Matrix_Scale(f32 x, f32 y, f32 z, MatrixMode mode) {
+void C02_Matrix_Scale(f32 x, f32 y, f32 z, MatrixMode mode) {
     MtxF* cmf = sCurrentMatrix;
 
     if (mode == MTXMODE_APPLY) {
@@ -273,7 +300,7 @@ void Matrix_Scale(f32 x, f32 y, f32 z, MatrixMode mode) {
  *
  * @remark original name: "Matrix_RotateX"
  */
-void Matrix_RotateXS(s16 x, MatrixMode mode) {
+void C02_Matrix_RotateXS(s16 x, MatrixMode mode) {
     MtxF* cmf;
     f32 sin;
     f32 cos;
@@ -363,7 +390,7 @@ void Matrix_RotateXS(s16 x, MatrixMode mode) {
  *
  * @remark original name may have been "Matrix_RotateX", but clashed with the previous function.
  */
-void Matrix_RotateXF(f32 x, MatrixMode mode) {
+void C02_Matrix_RotateXF(f32 x, MatrixMode mode) {
     MtxF* cmf;
     f32 sin;
     f32 cos;
@@ -437,7 +464,7 @@ void Matrix_RotateXF(f32 x, MatrixMode mode) {
  *
  * @param x rotation angle (radians).
  */
-void Matrix_RotateXFApply(f32 x) {
+void C02_Matrix_RotateXFApply(f32 x) {
     MtxF* cmf;
     f32 sin;
     f32 cos;
@@ -481,7 +508,7 @@ void Matrix_RotateXFApply(f32 x) {
  *
  * @param x rotation angle (radians).
  */
-void Matrix_RotateXFNew(f32 x) {
+void C02_Matrix_RotateXFNew(f32 x) {
     MtxF* cmf = sCurrentMatrix;
     s32 pad[2];
     f32 sin;
@@ -541,7 +568,7 @@ void Matrix_RotateXFNew(f32 x) {
  *
  * @remark original name: "Matrix_RotateY"
  */
-void Matrix_RotateYS(s16 y, MatrixMode mode) {
+void C02_Matrix_RotateYS(s16 y, MatrixMode mode) {
     MtxF* cmf;
     f32 sin;
     f32 cos;
@@ -630,7 +657,7 @@ void Matrix_RotateYS(s16 y, MatrixMode mode) {
  *
  * @remark original name may have been "Matrix_RotateY", but clashed with the previous function.
  */
-void Matrix_RotateYF(f32 y, MatrixMode mode) {
+void C02_Matrix_RotateYF(f32 y, MatrixMode mode) {
     MtxF* cmf;
     f32 sin;
     f32 cos;
@@ -721,7 +748,7 @@ void Matrix_RotateYF(f32 y, MatrixMode mode) {
  *
  * @remark original name: "Matrix_RotateZ"
  */
-void Matrix_RotateZS(s16 z, MatrixMode mode) {
+void C02_Matrix_RotateZS(s16 z, MatrixMode mode) {
     MtxF* cmf;
     f32 sin;
     f32 cos;
@@ -812,7 +839,7 @@ void Matrix_RotateZS(s16 z, MatrixMode mode) {
  *
  * @remark original name may have been "Matrix_RotateZ", but clashed with the previous function.
  */
-void Matrix_RotateZF(f32 z, MatrixMode mode) {
+void C02_Matrix_RotateZF(f32 z, MatrixMode mode) {
     MtxF* cmf;
     f32 sin;
     f32 cos;
@@ -893,7 +920,7 @@ void Matrix_RotateZF(f32 z, MatrixMode mode) {
  *
  * @remark original name: "Matrix_RotateXYZ", changed to reflect rotation order.
  */
-void Matrix_RotateZYX(s16 x, s16 y, s16 z, MatrixMode mode) {
+void C02_Matrix_RotateZYX(s16 x, s16 y, s16 z, MatrixMode mode) {
     MtxF* cmf = sCurrentMatrix;
     f32 temp1;
     f32 temp2;
@@ -992,7 +1019,7 @@ void Matrix_RotateZYX(s16 x, s16 y, s16 z, MatrixMode mode) {
  *
  * @remark original name appears to be "Matrix_softcv3_mult"
  */
-void Matrix_TranslateRotateZYX(Vec3f* translation, Vec3s* rot) {
+void C02_Matrix_TranslateRotateZYX(Vec3f* translation, Vec3s* rot) {
     MtxF* cmf = sCurrentMatrix;
     f32 sin = Math_SinS(rot->z);
     f32 cos = Math_CosS(rot->z);
@@ -1049,7 +1076,7 @@ void Matrix_TranslateRotateZYX(Vec3f* translation, Vec3s* rot) {
  *
  * @remark original name appears to be "Matrix_softcv3_load"
  */
-void Matrix_SetTranslateRotateYXZ(f32 x, f32 y, f32 z, Vec3s* rot) {
+void C02_Matrix_SetTranslateRotateYXZ(f32 x, f32 y, f32 z, Vec3s* rot) {
     MtxF* cmf = sCurrentMatrix;
     f32 sinY = Math_SinS(rot->y);
     f32 cosY = Math_CosS(rot->y);
@@ -1117,7 +1144,7 @@ void Matrix_SetTranslateRotateYXZ(f32 x, f32 y, f32 z, Vec3s* rot) {
  *
  * @remark original name: "_MtxF_to_Mtx"
  */
-Mtx* Matrix_MtxFToMtx(MtxF* src, Mtx* dest) {
+Mtx* C02_Matrix_MtxFToMtx(MtxF* src, Mtx* dest) {
     s32 temp;
     u16* intPart = (u16*)&dest->m[0][0];
     f32* elem;
@@ -1216,7 +1243,7 @@ Mtx* Matrix_MtxFToNewMtx(MtxF* src, GraphicsContext* gfxCtx) {
  *
  * @remark original name: "Matrix_Position"
  */
-void Matrix_MultVec3f(Vec3f* src, Vec3f* dest) {
+void C02_Matrix_MultVec3f(Vec3f* src, Vec3f* dest) {
     MtxF* cmf = sCurrentMatrix;
 
     dest->x = cmf->xw + (cmf->xx * src->x + cmf->xy * src->y + cmf->xz * src->z);
@@ -1314,7 +1341,7 @@ void Matrix_MultVecZ(f32 z, Vec3f* dest) {
  * @param[in] src input vector.
  * @param[out] dest output vector.
  */
-void Matrix_MultVec3fXZ(Vec3f* src, Vec3f* dest) {
+void C02_Matrix_MultVec3fXZ(Vec3f* src, Vec3f* dest) {
     MtxF* cmf = sCurrentMatrix;
 
     dest->x = cmf->xw + (cmf->xx * src->x + cmf->xy * src->y + cmf->xz * src->z);
@@ -1329,7 +1356,7 @@ void Matrix_MultVec3fXZ(Vec3f* src, Vec3f* dest) {
  *
  * @remark original name: "Matrix_copy_MtxF"
  */
-void Matrix_MtxFCopy(MtxF* dest, MtxF* src) {
+void C02_Matrix_MtxFCopy(MtxF* dest, MtxF* src) {
     f32 fv0;
     f32 fv1;
 
@@ -1384,7 +1411,7 @@ void Matrix_MtxFCopy(MtxF* dest, MtxF* src) {
  *
  * @remark original name: "Matrix_MtxtoMtxF"
  */
-void Matrix_MtxToMtxF(Mtx* src, MtxF* dest) {
+void C02_Matrix_MtxToMtxF(Mtx* src, MtxF* dest) {
     u16* intPart = (u16*)&src->m[0][0];
     u16* fracPart = (u16*)&src->m[2][0];
 
@@ -1417,7 +1444,7 @@ void Matrix_MtxToMtxF(Mtx* src, MtxF* dest) {
  * @param[out] dest output vector
  * @param[in] mf matrix to multiply by
  */
-void Matrix_MultVec3fExt(Vec3f* src, Vec3f* dest, MtxF* mf) {
+void C02_Matrix_MultVec3fExt(Vec3f* src, Vec3f* dest, MtxF* mf) {
     dest->x = mf->xw + (mf->xx * src->x + mf->xy * src->y + mf->xz * src->z);
     dest->y = mf->yw + (mf->yx * src->x + mf->yy * src->y + mf->yz * src->z);
     dest->z = mf->zw + (mf->zx * src->x + mf->zy * src->y + mf->zz * src->z);
@@ -1469,7 +1496,7 @@ void Matrix_Transpose(MtxF* mf) {
  *
  * @param[in] mf matrix whose linear part will replace the normalised part of A.
  */
-void Matrix_ReplaceRotation(MtxF* mf) {
+void C02_Matrix_ReplaceRotation(MtxF* mf) {
     MtxF* cmf = sCurrentMatrix;
     f32 acc;
     f32 component;
@@ -1531,7 +1558,7 @@ void Matrix_ReplaceRotation(MtxF* mf) {
  *
  * @remark original name: "Matrix_to_rotate_new"?
  */
-void Matrix_MtxFToYXZRot(MtxF* src, Vec3s* dest, s32 nonUniformScale) {
+void C02_Matrix_MtxFToYXZRot(MtxF* src, Vec3s* dest, s32 nonUniformScale) {
     f32 temp;
     f32 temp2;
     f32 temp3;
@@ -1603,7 +1630,7 @@ void Matrix_MtxFToYXZRot(MtxF* src, Vec3s* dest, s32 nonUniformScale) {
  *
  * See Matrix_MtxFToYXZRot() for full inline documentation.
  */
-void Matrix_MtxFToZYXRot(MtxF* src, Vec3s* dest, s32 nonUniformScale) {
+void C02_Matrix_MtxFToZYXRot(MtxF* src, Vec3s* dest, s32 nonUniformScale) {
     f32 temp;
     f32 temp2;
     f32 temp3;
@@ -1656,7 +1683,7 @@ void Matrix_MtxFToZYXRot(MtxF* src, Vec3s* dest, s32 nonUniformScale) {
  *
  * @remark original name may have been "Matrix_RotateVector", but clashed with the next function.
  */
-void Matrix_RotateAxisF(f32 angle, Vec3f* axis, MatrixMode mode) {
+void C02_Matrix_RotateAxisF(f32 angle, Vec3f* axis, MatrixMode mode) {
     MtxF* cmf;
     f32 sin;
     f32 cos;
@@ -1759,7 +1786,7 @@ void Matrix_RotateAxisF(f32 angle, Vec3f* axis, MatrixMode mode) {
  *
  * @remark original name: "Matrix_RotateVector"
  */
-void Matrix_RotateAxisS(s16 angle, Vec3f* axis, MatrixMode mode) {
+void C02_Matrix_RotateAxisS(s16 angle, Vec3f* axis, MatrixMode mode) {
     MtxF* cmf;
     f32 cos;
     f32 sin;
@@ -1850,4 +1877,156 @@ void Matrix_RotateAxisS(s16 angle, Vec3f* axis, MatrixMode mode) {
             cmf->ww = 1.0f;
         }
     }
+}
+
+void Matrix_Mult(MtxF* mf, MatrixMode mode) {
+    C02_Enter(10);
+    C02_Matrix_Mult(mf, mode);
+    C02_Exit(10);
+}
+
+void Matrix_Translate(f32 x, f32 y, f32 z, MatrixMode mode) {
+    C02_Enter(11);
+    C02_Matrix_Translate(x, y, z, mode);
+    C02_Exit(11);
+}
+
+void Matrix_Scale(f32 x, f32 y, f32 z, MatrixMode mode) {
+    C02_Enter(12);
+    C02_Matrix_Scale(x, y, z, mode);
+    C02_Exit(12);
+}
+
+void Matrix_RotateXS(s16 x, MatrixMode mode) {
+    C02_Enter(13);
+    C02_Matrix_RotateXS(x, mode);
+    C02_Exit(13);
+}
+
+void Matrix_RotateXF(f32 x, MatrixMode mode) {
+    C02_Enter(14);
+    C02_Matrix_RotateXF(x, mode);
+    C02_Exit(14);
+}
+
+void Matrix_RotateXFApply(f32 x) {
+    C02_Enter(15);
+    C02_Matrix_RotateXFApply(x);
+    C02_Exit(15);
+}
+
+void Matrix_RotateXFNew(f32 x) {
+    C02_Enter(16);
+    C02_Matrix_RotateXFNew(x);
+    C02_Exit(16);
+}
+
+void Matrix_RotateYS(s16 y, MatrixMode mode) {
+    C02_Enter(17);
+    C02_Matrix_RotateYS(y, mode);
+    C02_Exit(17);
+}
+
+void Matrix_RotateYF(f32 y, MatrixMode mode) {
+    C02_Enter(18);
+    C02_Matrix_RotateYF(y, mode);
+    C02_Exit(18);
+}
+
+void Matrix_RotateZS(s16 z, MatrixMode mode) {
+    C02_Enter(19);
+    C02_Matrix_RotateZS(z, mode);
+    C02_Exit(19);
+}
+
+void Matrix_RotateZF(f32 z, MatrixMode mode) {
+    C02_Enter(20);
+    C02_Matrix_RotateZF(z, mode);
+    C02_Exit(20);
+}
+
+void Matrix_RotateZYX(s16 x, s16 y, s16 z, MatrixMode mode) {
+    C02_Enter(21);
+    C02_Matrix_RotateZYX(x, y, z, mode);
+    C02_Exit(21);
+}
+
+void Matrix_TranslateRotateZYX(Vec3f* translation, Vec3s* rot) {
+    C02_Enter(22);
+    C02_Matrix_TranslateRotateZYX(translation, rot);
+    C02_Exit(22);
+}
+
+void Matrix_SetTranslateRotateYXZ(f32 x, f32 y, f32 z, Vec3s* rot) {
+    C02_Enter(23);
+    C02_Matrix_SetTranslateRotateYXZ(x, y, z, rot);
+    C02_Exit(23);
+}
+
+Mtx* Matrix_MtxFToMtx(MtxF* src, Mtx* dest) {
+    Mtx* r;
+    C02_Enter(24);
+    r = C02_Matrix_MtxFToMtx(src, dest);
+    C02_Exit(24);
+    return r;
+}
+
+void Matrix_MultVec3f(Vec3f* src, Vec3f* dest) {
+    C02_Enter(25);
+    C02_Matrix_MultVec3f(src, dest);
+    C02_Exit(25);
+}
+
+void Matrix_MultVec3fXZ(Vec3f* src, Vec3f* dest) {
+    C02_Enter(26);
+    C02_Matrix_MultVec3fXZ(src, dest);
+    C02_Exit(26);
+}
+
+void Matrix_MtxFCopy(MtxF* dest, MtxF* src) {
+    C02_Enter(27);
+    C02_Matrix_MtxFCopy(dest, src);
+    C02_Exit(27);
+}
+
+void Matrix_MtxToMtxF(Mtx* src, MtxF* dest) {
+    C02_Enter(28);
+    C02_Matrix_MtxToMtxF(src, dest);
+    C02_Exit(28);
+}
+
+void Matrix_MultVec3fExt(Vec3f* src, Vec3f* dest, MtxF* mf) {
+    C02_Enter(29);
+    C02_Matrix_MultVec3fExt(src, dest, mf);
+    C02_Exit(29);
+}
+
+void Matrix_ReplaceRotation(MtxF* mf) {
+    C02_Enter(30);
+    C02_Matrix_ReplaceRotation(mf);
+    C02_Exit(30);
+}
+
+void Matrix_MtxFToYXZRot(MtxF* src, Vec3s* dest, s32 nonUniformScale) {
+    C02_Enter(31);
+    C02_Matrix_MtxFToYXZRot(src, dest, nonUniformScale);
+    C02_Exit(31);
+}
+
+void Matrix_MtxFToZYXRot(MtxF* src, Vec3s* dest, s32 nonUniformScale) {
+    C02_Enter(32);
+    C02_Matrix_MtxFToZYXRot(src, dest, nonUniformScale);
+    C02_Exit(32);
+}
+
+void Matrix_RotateAxisF(f32 angle, Vec3f* axis, MatrixMode mode) {
+    C02_Enter(33);
+    C02_Matrix_RotateAxisF(angle, axis, mode);
+    C02_Exit(33);
+}
+
+void Matrix_RotateAxisS(s16 angle, Vec3f* axis, MatrixMode mode) {
+    C02_Enter(34);
+    C02_Matrix_RotateAxisS(angle, axis, mode);
+    C02_Exit(34);
 }

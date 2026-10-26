@@ -3,6 +3,15 @@
 #include "gfx.h"
 #include "macros.h"
 #include "z64math.h"
+void C02_Enter(s32 slot);
+void C02_Exit(s32 slot);
+void C02_SkinMatrix_Vec3fMtxFMultXYZW(MtxF* mf, Vec3f* src, Vec3f* xyzDest, f32* wDest);
+void C02_SkinMatrix_MtxFMtxFMult(MtxF* mfB, MtxF* mfA, MtxF* dest);
+s32 C02_SkinMatrix_Invert(MtxF* src, MtxF* dest);
+void C02_SkinMatrix_SetRotateRPY(MtxF* mf, s16 roll, s16 pitch, s16 yaw);
+void C02_SkinMatrix_SetRotateYRP(MtxF* mf, s16 yaw, s16 roll, s16 pitch);
+void C02_SkinMatrix_MtxFToMtx(MtxF* src, Mtx* dest);
+void C02_SkinMatrix_SetRotateAroundVec(MtxF* mf, s16 a, f32 x, f32 y, f32 z);
 
 MtxF sMtxFClear = { {
     { 1.0f, 0.0f, 0.0f, 0.0f },
@@ -17,7 +26,7 @@ MtxF sMtxFClear = { {
  *
  * \f[ [\texttt{xyzDest}, \texttt{wDest}] = [\texttt{src}, 1] \cdot [mf] \f]
  */
-void SkinMatrix_Vec3fMtxFMultXYZW(MtxF* mf, Vec3f* src, Vec3f* xyzDest, f32* wDest) {
+void C02_SkinMatrix_Vec3fMtxFMultXYZW(MtxF* mf, Vec3f* src, Vec3f* xyzDest, f32* wDest) {
     xyzDest->x = mf->xw + ((src->x * mf->xx) + (src->y * mf->xy) + (src->z * mf->xz));
     xyzDest->y = mf->yw + ((src->x * mf->yx) + (src->y * mf->yy) + (src->z * mf->yz));
     xyzDest->z = mf->zw + ((src->x * mf->zx) + (src->y * mf->zy) + (src->z * mf->zz));
@@ -54,7 +63,7 @@ void SkinMatrix_Vec3fMtxFMultXYZ(MtxF* mf, Vec3f* src, Vec3f* dest) {
  * Matrix multiplication, dest = mfA * mfB.
  * mfA and dest should not be the same matrix.
  */
-void SkinMatrix_MtxFMtxFMult(MtxF* mfB, MtxF* mfA, MtxF* dest) {
+void C02_SkinMatrix_MtxFMtxFMult(MtxF* mfB, MtxF* mfA, MtxF* dest) {
     f32 rx;
     f32 ry;
     f32 rz;
@@ -233,7 +242,7 @@ void SkinMatrix_MtxFCopy(MtxF* src, MtxF* dest) {
  * returns 0 if successfully inverted
  * returns 2 if matrix non-invertible (0 determinant)
  */
-s32 SkinMatrix_Invert(MtxF* src, MtxF* dest) {
+s32 C02_SkinMatrix_Invert(MtxF* src, MtxF* dest) {
     MtxF mfCopy;
     s32 i;
     f32 temp2;
@@ -306,7 +315,7 @@ void SkinMatrix_SetScale(MtxF* mf, f32 x, f32 y, f32 z) {
 /**
  * Produces a rotation matrix = (roll rotation matrix) * (pitch rotation matrix) * (yaw rotation matrix)
  */
-void SkinMatrix_SetRotateRPY(MtxF* mf, s16 roll, s16 pitch, s16 yaw) {
+void C02_SkinMatrix_SetRotateRPY(MtxF* mf, s16 roll, s16 pitch, s16 yaw) {
     f32 cos2;
     f32 sin = Math_SinS(yaw);
     f32 cos = Math_CosS(yaw);
@@ -369,7 +378,7 @@ void SkinMatrix_SetRotateRPY(MtxF* mf, s16 roll, s16 pitch, s16 yaw) {
 /**
  * Produces a rotation matrix = (yaw rotation matrix) * (roll rotation matrix) * (pitch rotation matrix)
  */
-void SkinMatrix_SetRotateYRP(MtxF* mf, s16 yaw, s16 roll, s16 pitch) {
+void C02_SkinMatrix_SetRotateYRP(MtxF* mf, s16 yaw, s16 roll, s16 pitch) {
     f32 cos2;
     f32 sin;
     f32 cos;
@@ -509,7 +518,7 @@ void SkinMatrix_Vec3sToVec3f(Vec3s* src, Vec3f* dest) {
     dest->z = src->z;
 }
 
-void SkinMatrix_MtxFToMtx(MtxF* src, Mtx* dest) {
+void C02_SkinMatrix_MtxFToMtx(MtxF* src, Mtx* dest) {
     s32 temp;
     u16* m1 = (u16*)&dest->m[0][0];
     u16* m2 = (u16*)&dest->m[2][0];
@@ -593,7 +602,7 @@ Mtx* SkinMatrix_MtxFToNewMtx(GraphicsContext* gfxCtx, MtxF* src) {
 /**
  * Produces a matrix which rotates vectors by angle a around a unit vector with components (x,y,z)
  */
-void SkinMatrix_SetRotateAroundVec(MtxF* mf, s16 a, f32 x, f32 y, f32 z) {
+void C02_SkinMatrix_SetRotateAroundVec(MtxF* mf, s16 a, f32 x, f32 y, f32 z) {
     f32 sinA;
     f32 cosA;
     f32 xx;
@@ -800,4 +809,48 @@ void SkinMatrix_SetZRotation(MtxF* mf, s16 a) {
     mf->yy = cosA;
     mf->yx = sinA;
     mf->xy = -sinA;
+}
+
+void SkinMatrix_Vec3fMtxFMultXYZW(MtxF* mf, Vec3f* src, Vec3f* xyzDest, f32* wDest) {
+    C02_Enter(35);
+    C02_SkinMatrix_Vec3fMtxFMultXYZW(mf, src, xyzDest, wDest);
+    C02_Exit(35);
+}
+
+void SkinMatrix_MtxFMtxFMult(MtxF* mfB, MtxF* mfA, MtxF* dest) {
+    C02_Enter(36);
+    C02_SkinMatrix_MtxFMtxFMult(mfB, mfA, dest);
+    C02_Exit(36);
+}
+
+s32 SkinMatrix_Invert(MtxF* src, MtxF* dest) {
+    s32 r;
+    C02_Enter(37);
+    r = C02_SkinMatrix_Invert(src, dest);
+    C02_Exit(37);
+    return r;
+}
+
+void SkinMatrix_SetRotateRPY(MtxF* mf, s16 roll, s16 pitch, s16 yaw) {
+    C02_Enter(38);
+    C02_SkinMatrix_SetRotateRPY(mf, roll, pitch, yaw);
+    C02_Exit(38);
+}
+
+void SkinMatrix_SetRotateYRP(MtxF* mf, s16 yaw, s16 roll, s16 pitch) {
+    C02_Enter(39);
+    C02_SkinMatrix_SetRotateYRP(mf, yaw, roll, pitch);
+    C02_Exit(39);
+}
+
+void SkinMatrix_MtxFToMtx(MtxF* src, Mtx* dest) {
+    C02_Enter(40);
+    C02_SkinMatrix_MtxFToMtx(src, dest);
+    C02_Exit(40);
+}
+
+void SkinMatrix_SetRotateAroundVec(MtxF* mf, s16 a, f32 x, f32 y, f32 z) {
+    C02_Enter(41);
+    C02_SkinMatrix_SetRotateAroundVec(mf, a, x, y, z);
+    C02_Exit(41);
 }

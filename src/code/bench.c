@@ -480,6 +480,44 @@ static s32 Bench_InScene(GameState* gameState) {
     return (fileSelect->menuMode == FS_MENU_MODE_CONFIG) && (fileSelect->configMode == CM_MAIN_MENU);
 }
 
+
+#define C02_N 42
+u32 gC02Calls[C02_N];
+u32 gC02Cpu[C02_N];
+static s32 sC02Depth[C02_N];
+static u32 sC02Mark[C02_N];
+void C02_Enter(s32 slot) {
+    gC02Calls[slot]++;
+    if (sC02Depth[slot]++ == 0) {
+        sC02Mark[slot] = Bench_CpuNow();
+        if (sBenchEmux) {
+            Bench_XProfStart(slot);
+        }
+    }
+}
+void C02_Exit(s32 slot) {
+    if (--sC02Depth[slot] == 0) {
+        if (sBenchEmux) {
+            Bench_XProfStop(slot);
+        }
+        gC02Cpu[slot] += Bench_CpuNow() - sC02Mark[slot];
+    }
+}
+static void C02_Print(void) {
+    static char line[96];
+    s32 s;
+    if (!sBenchEmux) {
+        return;
+    }
+    for (s = 10; s < C02_N; s++) {
+        if (gC02Calls[s] != 0) {
+            sprintf(line, "C02 %u %d %u %u %u %u\n", gBenchProbe.tick, s, gC02Calls[s], gC02Cpu[s],
+                    Bench_XProfRead(s, 0x11), Bench_XProfRead(s, 0));
+            Bench_Puts(line);
+        }
+    }
+}
+
 void Bench_BeginFrame(GameState* gameState) {
     if (!gBenchCpuClock.enabled) {
         gBenchProbe.tick++;
@@ -488,6 +526,7 @@ void Bench_BeginFrame(GameState* gameState) {
     Bench_SysEnter(BENCH_SYS_BENCH);
     Bench_Phase(BENCH_PHASE_PRE);
     Bench_TickBoundary();
+    C02_Print();
     gBenchProbe.tick++;
     Bench_SysExit();
 }
