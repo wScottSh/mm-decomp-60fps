@@ -1006,6 +1006,7 @@ static u32 sBenchAudioTagHead = 0;
 static u32 sBenchAudioTagCount = 0;
 static u32 sBenchAudioAiFifo[2]; // AI model: samples << 10 left in the playing and the queued buffer
 static u32 sBenchAudioCount = 0x12345678;
+static u32 sBenchAudioRandomTick;
 static u32 sBenchAudioCmds[3]; // per AI buffer: commands processed in the frame that synthesized it
 static u32 sBenchAudioCmdHash[3];
 static s16 sBenchAudioNoise[0x2000];
@@ -1094,6 +1095,15 @@ void Bench_AudioUpdateBegin(GameState* gameState) {
     if (waited) {
         gBenchAudio.graphWaits++;
     }
+    sBenchAudioRandomTick = gAudioCtx.audioRandom;
+}
+
+/**
+ * audioRandom for game code that reads it outside Audio_Update (Link's metal footstep, code_8019AF00.c),
+ * while audio frames run: with the pin, the value it had when this tick's Audio_Update began.
+ */
+u32 Bench_AudioGraphRandom(void) {
+    return Bench_AudioPinned(BENCH_AUDIO_PIN_CMDS) ? sBenchAudioRandomTick : gAudioCtx.audioRandom;
 }
 
 void Bench_AudioUpdateEnd(GameState* gameState) {

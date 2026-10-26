@@ -311,5 +311,6 @@ s32 Bench_AudioPinLoads(void);
 void Bench_AudioUpdateBegin(struct GameState* gameState);
 void Bench_AudioUpdateEnd(struct GameState* gameState);
 void Bench_AudioGraphWait(s32 waiting);
+u32 Bench_AudioGraphRandom(void);
 
 #endif

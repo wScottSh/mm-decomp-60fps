@@ -1,4 +1,7 @@
 #include "global.h"
+#if BENCH
+#include "bench.h"
+#endif
 #include "z64voice.h"
 #include "attributes.h"
 
@@ -4201,7 +4204,11 @@ void Audio_PlaySfx_AtPosForMetalEffectsWithSyncedFreqAndVolume(Vec3f* pos, u16 s
         sp2C = 1.0f;
     } else {
         phi_f0 = 1.1f;
+#if BENCH
+        phi_v0 = Bench_AudioGraphRandom() & 1;
+#else
         phi_v0 = gAudioCtx.audioRandom & 1;
+#endif
     }
 
     if (phi_f0 < freqVolParam) {
