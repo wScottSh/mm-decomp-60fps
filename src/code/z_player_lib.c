@@ -4,6 +4,9 @@
  */
 
 #include "global.h"
+#if BENCH
+#include "bench.h"
+#endif
 #include "z64draw.h"
 
 #include "assets/objects/gameplay_keep/gameplay_keep.h"
@@ -205,7 +208,11 @@ void func_801229FC(Player* player) {
                             &player->maskObjectLoadQueue, NULL);
         player->maskObjectLoadState++;
     } else if (player->maskObjectLoadState == 2) {
+#if BENCH
+        if (Bench_DmaRecv(&player->maskObjectLoadQueue, OS_MESG_NOBLOCK) == 0) {
+#else
         if (osRecvMesg(&player->maskObjectLoadQueue, NULL, OS_MESG_NOBLOCK) == 0) {
+#endif
             player->maskObjectLoadState = 0;
 
             if (player->currentMask == PLAYER_MASK_GREAT_FAIRY) {
@@ -2943,7 +2950,11 @@ void Player_DrawGetItemImpl(PlayState* play, Player* player, Vec3f* refPos, s32 
 }
 
 void Player_DrawGetItem(PlayState* play, Player* player) {
+#if BENCH
+    if (!player->giObjectLoading || (Bench_DmaRecv(&player->giObjectLoadQueue, OS_MESG_NOBLOCK) == 0)) {
+#else
     if (!player->giObjectLoading || (osRecvMesg(&player->giObjectLoadQueue, NULL, OS_MESG_NOBLOCK) == 0)) {
+#endif
         Vec3f refPos;
         s32 drawIdPlusOne;
 

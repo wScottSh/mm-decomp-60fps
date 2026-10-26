@@ -15,6 +15,7 @@
 #include "libu64/pad.h"
 #include "sys_flashrom.h"
 #include "sys_ucode.h"
+#include "z64audio.h"
 #include "PR/gs2dex.h"
 #include "overlays/gamestates/ovl_file_choose/z_file_select.h"
 
@@ -699,7 +700,7 @@ static Gfx Bench_PinnedCommand(Gfx cmd) {
         case G_SETOTHERMODE_H:
             Bench_UnnoiseField(Bench_OtherModeMask(w0), &w1, G_MDSFT_RGBDITHER, 2, 0);
             Bench_UnnoiseField(Bench_OtherModeMask(w0), &w1, G_MDSFT_ALPHADITHER, 2, 0);
-            if (Bench_OtherModeMask(w0) & G_PM_1PRIMITIVE) {
+            if ((Bench_OtherModeMask(w0) & G_PM_1PRIMITIVE) && (gBenchConfig.noisePin != BENCH_NOISE_PIN_NOISE_ONLY)) {
                 w1 |= G_PM_1PRIMITIVE;
             }
             break;
@@ -711,7 +712,9 @@ static Gfx Bench_PinnedCommand(Gfx cmd) {
         case G_RDPSETOTHERMODE:
             Bench_UnnoiseField(0xFFFFFF, &w0, G_MDSFT_RGBDITHER, 2, 0);
             Bench_UnnoiseField(0xFFFFFF, &w0, G_MDSFT_ALPHADITHER, 2, 0);
-            w0 |= G_PM_1PRIMITIVE;
+            if (gBenchConfig.noisePin != BENCH_NOISE_PIN_NOISE_ONLY) {
+                w0 |= G_PM_1PRIMITIVE;
+            }
             Bench_UnnoiseField(0xFFFFFFFF, &w1, G_MDSFT_ALPHACOMPARE, 3, 1);
             break;
 
@@ -949,4 +952,159 @@ void Bench_PinNoise(CfbInfo* cfb, Gfx* taskList) {
     gBenchProbe.noise.visited += walk->record.visited;
     gBenchProbe.noise.commands += walk->record.commands;
     gBenchProbe.noise.patched += walk->record.patched;
+}
+
+/**
+ * The load pin (BENCH_FLAG_PIN_LOADS). Game logic polls async DMA requests (OS_MESG_NOBLOCK) and reads state
+ * the audio thread derives from its commands, so the tick at which logic sees a load finish depends on DMA,
+ * audio and CPU timing (docs/fps60/architecture.md, risk R4). With the pin set, both depend only on ticks:
+ *
+ *  - A DMA request issued during tick t is "not done" to the first poll of its queue in tick t and "done" to
+ *    every later poll, which waits for the transfer. A second poll in tick t is a wait loop (Play_Init spins on
+ *    Room_ProcessRoomRequest), which retail also leaves only once the transfer is done.
+ *  - Before Audio_Update reads audio state, the audio thread has applied every command the previous tick's
+ *    Audio_Update sent (sequence starts, sync sequence and font loads included).
+ *
+ * Audio state that changes with playback time (a sequence ending, fades, tempo, ocarina notes) still reaches
+ * logic at timing-dependent ticks; tools/fps60/README.md lists those reads.
+ */
+#define BENCH_DMA_ISSUES 128
+
+typedef struct BenchDmaIssue {
+    OSMesgQueue* queue; // NULL for an empty slot
+    u32 tick;
+    s32 polled; // polled in its issue tick
+} BenchDmaIssue;
+
+static BenchDmaIssue sBenchDmaIssues[BENCH_DMA_ISSUES];
+static u32 sBenchAudioSentCount;
+static s32 sBenchAudioSent = false;
+
+static BenchDmaIssue* Bench_DmaFind(OSMesgQueue* queue) {
+    s32 i;
+
+    for (i = 0; i < BENCH_DMA_ISSUES; i++) {
+        if (sBenchDmaIssues[i].queue == queue) {
+            return &sBenchDmaIssues[i];
+        }
+    }
+    return NULL;
+}
+
+/**
+ * DmaMgr_RequestAsync, from any thread, once Bench_Boot has run.
+ */
+void Bench_DmaIssued(OSMesgQueue* queue) {
+    OSIntMask mask = __osDisableInt();
+    BenchDmaIssue* issue = Bench_DmaFind(queue);
+    s32 i;
+
+    if (issue == NULL) {
+        issue = Bench_DmaFind(NULL);
+    }
+    if (issue == NULL) {
+        // Requests whose message is received outside Bench_DmaRecv (skybox, do-action and animation loads)
+        // are never removed, so the oldest record goes. Only a record from this tick can still be polled.
+        issue = &sBenchDmaIssues[0];
+        for (i = 1; i < BENCH_DMA_ISSUES; i++) {
+            if ((s32)(sBenchDmaIssues[i].tick - issue->tick) < 0) {
+                issue = &sBenchDmaIssues[i];
+            }
+        }
+        if (issue->tick == gBenchProbe.tick) {
+            gBenchProbe.load.dmaOverflow++;
+        }
+    }
+    issue->queue = queue;
+    issue->tick = gBenchProbe.tick;
+    issue->polled = false;
+    __osRestoreInt(mask);
+}
+
+/**
+ * The request on `queue` was received outside Bench_DmaRecv (DmaMgr_RequestSync).
+ */
+void Bench_DmaDone(OSMesgQueue* queue) {
+    OSIntMask mask = __osDisableInt();
+    BenchDmaIssue* issue = Bench_DmaFind(queue);
+
+    if (issue != NULL) {
+        issue->queue = NULL;
+    }
+    __osRestoreInt(mask);
+}
+
+/**
+ * osRecvMesg(queue, NULL, flag) at a game logic poll of an async DMA request.
+ */
+s32 Bench_DmaRecv(OSMesgQueue* queue, s32 flag) {
+    BenchDmaIssue* issue;
+
+    if (!(gBenchConfig.flags & BENCH_FLAG_PIN_LOADS)) {
+        return osRecvMesg(queue, NULL, flag);
+    }
+    gBenchProbe.load.dmaPolls++;
+    issue = Bench_DmaFind(queue);
+    if ((flag == OS_MESG_NOBLOCK) && (issue == NULL)) {
+        gBenchProbe.load.dmaUntracked++;
+        return osRecvMesg(queue, NULL, OS_MESG_NOBLOCK);
+    }
+    if ((flag == OS_MESG_NOBLOCK) && (issue->tick == gBenchProbe.tick) && !issue->polled) {
+        issue->polled = true;
+        gBenchProbe.load.dmaHeld++;
+        return -1;
+    }
+    if (flag == OS_MESG_NOBLOCK) {
+        gBenchProbe.load.dmaWaited++;
+    }
+    osRecvMesg(queue, NULL, OS_MESG_BLOCK);
+    Bench_DmaDone(queue);
+    return 0;
+}
+
+/**
+ * After Audio_Update: its commands are sent.
+ */
+void Bench_AudioSent(void) {
+    sBenchAudioSentCount = gAudioCtx.totalTaskCount;
+    sBenchAudioSent = true;
+}
+
+/**
+ * Before Audio_Update: waits until the audio thread has finished an update that took the previous tick's
+ * commands from its queue. The audio thread (priority 11) preempts this graph thread at each retrace.
+ */
+void Bench_AudioBarrier(void) {
+    volatile s32* count = &gAudioCtx.totalTaskCount;
+    volatile OSMesgQueue* queue = gAudioCtx.threadCmdProcQueueP;
+    s32 last;
+    s32 drained = false;
+
+    if (!(gBenchConfig.flags & BENCH_FLAG_PIN_LOADS) || !sBenchAudioSent) {
+        return;
+    }
+    sBenchAudioSent = false;
+    gBenchProbe.load.audioBarriers++;
+    last = *count;
+    // An update that starts takes the queue only if totalTaskCount is a multiple of specUnk4, so the
+    // queue was taken by update sent + specUnk4 at the latest, and that update has finished once the next
+    // one starts. An audio reset restarts the count, so the slow path below covers it.
+    if ((queue->validCount == 0) &&
+        (last - (s32)sBenchAudioSentCount > (s32)gAudioCtx.audioBufferParameters.specUnk4)) {
+        return;
+    }
+    gBenchProbe.load.audioWaits++;
+    // The previous tick's message went in before this wait, so once the queue is seen empty it has been taken.
+    // The update that took it has finished when a later update starts.
+    while (true) {
+        s32 now = *count;
+
+        if (now != last) {
+            if (drained) {
+                break;
+            }
+            last = now;
+        }
+        drained = drained || (queue->validCount == 0);
+    }
 }

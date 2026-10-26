@@ -1,10 +1,18 @@
 # fps60 baseline: the reference build
 
-This is the first run of the fps60 harness (`tools/fps60/`) on the reference build: a `BENCH=1` build of this tree, retail game code with the bench hooks. Later units compare their candidates against a run of the same harness, not against these numbers. Every number here was measured on 2026-10-25 on unicron (AMD Ryzen AI MAX+ 395, 32 threads) with the pinned runner.
+This is the first run of the fps60 harness (`tools/fps60/`) on the reference build: a `BENCH=1` build of this tree, retail game code with the bench hooks. Later units compare their candidates against a run of the same harness, not against these numbers. A new baseline on main runs the harness twice: once with `--noise-pin off` for presentation and load (retail rendering, load pin off), and once with the default `--noise-pin on` (load pin on) as the F1 and F2 reference:
+
+```sh
+tools/fps60/run.py build/n64-us-bench/mm-n64-us.z64 --out RESULTS-load --noise-pin off --check-determinism
+tools/fps60/run.py build/n64-us-bench/mm-n64-us.z64 --out RESULTS-f1 --check-determinism
+tools/fps60/report.py RESULTS-load/run1
+```
+
+Every number below was measured on 2026-10-25 on unicron (AMD Ryzen AI MAX+ 395, 32 threads) with the pinned runner.
 
 - Reference build: `make -j32 BENCH=1` at commit `119fa3c81` (branch `harness/H1a`). Later commits on that branch change only `tools/` and `docs/`, so `src/` and `include/` are the same at its head. ROM sha256 `3453508b29662a0d`. The plain build at the same commit still matches (`build/n64-us/mm-n64-us.z64: OK`).
 - Runner: `~/n64-timing/build/mm60-runner/rundir/bin/n64-run`, sha256 `1f9d59f66929c5b5` (ares `54f35f9c7`).
-- Command: `tools/fps60/run.py build/n64-us-bench/mm-n64-us.z64 --out RESULTS --check-determinism` (4 jobs). The tables are `tools/fps60/report.py RESULTS/run1`.
+- Command: `tools/fps60/run.py build/n64-us-bench/mm-n64-us.z64 --out RESULTS --check-determinism` (4 jobs). The tables are `tools/fps60/report.py RESULTS/run1`. This run predates the noise pin and the load pin, so it rendered and loaded as retail: on today's harness that is `--noise-pin off`, which also turns the load pin off.
 - Determinism: `determinism: PASS, 50 files byte-identical (host.txt, wall.tsv excluded)`. `fidelity.py RESULTS/run1 RESULTS/run2` passes every scene.
 
 Presentation (fields per displayed image, complete images in the window):
@@ -59,7 +67,7 @@ The load metrics of `tools/fps60/README.md` (Load metrics), measured on 2026-10-
 
 - Reference build: `make -j32 BENCH=1` at commit `13a2afd28` (branch `harness/H1b`). Later commits on that branch change only `tools/`, `docs/` and `README.md`. ROM sha256 `231160338bb5642e`. The plain build at the same commit still matches (`build/n64-us/mm-n64-us.z64: OK`).
 - Runner: sha256 `1f9d59f66929c5b5`.
-- Command: `tools/fps60/run.py build/n64-us-bench/mm-n64-us.z64 --out RESULTS --check-determinism`, then `tools/fps60/report.py RESULTS/run1`.
+- Command: `tools/fps60/run.py build/n64-us-bench/mm-n64-us.z64 --out RESULTS --check-determinism`, then `tools/fps60/report.py RESULTS/run1`. Like the run above, it predates both pins; today's equivalent is `--noise-pin off`.
 - Determinism: `determinism: PASS, 75 files byte-identical (host.txt, wall.tsv excluded)`.
 - One field is 16.715 ms (median runner field, 1,567,040 PClocks in `sct`). Shares are of that.
 - The load hooks moved code, so this build's presentation differs from H1a's in one scene: `filesel` shows 510 images with 87 lag ticks (H1a's build: 472 and 125). The five Play scenes are unchanged (198 ticks, no lag tick).

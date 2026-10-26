@@ -1,4 +1,7 @@
 #include "global.h"
+#if BENCH
+#include "bench.h"
+#endif
 #include "PR/gs2dex.h"
 #include "sys_cfb.h"
 #include "sys_cmpdma.h"
@@ -6769,7 +6772,11 @@ void Interface_LoadStory(PlayState* play, s32 osMesgFlag) {
             interfaceCtx->storyDmaStatus = STORY_DMA_LOADING;
             FALLTHROUGH;
         case STORY_DMA_LOADING:
+#if BENCH
+            if (Bench_DmaRecv(&interfaceCtx->storyMsgQueue, osMesgFlag) == 0) {
+#else
             if (osRecvMesg(&interfaceCtx->storyMsgQueue, NULL, osMesgFlag) == 0) {
+#endif
                 interfaceCtx->storyDmaStatus = STORY_DMA_DONE;
             }
             break;

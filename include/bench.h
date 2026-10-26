@@ -26,9 +26,11 @@ struct GraphicsContext;
 #define BENCH_NOISE_PIN_OFF 0   // retail rendering (perf runs)
 #define BENCH_NOISE_PIN_ON 1    // Bench_PinNoise takes RDP timing out of every gfx task's pixels (fidelity runs)
 #define BENCH_NOISE_PIN_CHECK 2 // as ON, and every task is walked a second time to check the walk is idempotent
+#define BENCH_NOISE_PIN_NOISE_ONLY 3 // as ON, but pipeline mode stays as emitted: exposes stale span reads
 
 // BenchConfig.flags
 #define BENCH_FLAG_PIN_EFFECT_BUDGET (1 << 1) // func_80173B48 returns its no-lag value
+#define BENCH_FLAG_PIN_LOADS (1 << 2)         // DMA completion and audio command effects reach logic only at tick boundaries
 
 /**
  * Controller 1 from the tick `tick` ticks after the scene settled (BenchProbe.settleTick) until the
@@ -185,6 +187,20 @@ typedef struct BenchNoiseTotals {
 } BenchNoiseTotals;
 
 /**
+ * The load pin (BENCH_FLAG_PIN_LOADS, Bench_DmaRecv and Bench_AudioBarrier in src/code/bench.c), counted
+ * since boot.
+ */
+typedef struct BenchLoadTotals {
+    u32 dmaPolls;     // Bench_DmaRecv calls
+    u32 dmaHeld;      // first polls in the tick that issued the request, answered "not done"
+    u32 dmaWaited;    // later polls, which took the transfer (waiting for it if it was still running)
+    u32 dmaUntracked; // polls of a queue with no issue record, answered as retail does: the pin did not hold
+    u32 dmaOverflow;  // records of this tick's requests that the full issue table dropped
+    u32 audioBarriers; // ticks that checked the audio thread had applied the previous tick's commands
+    u32 audioWaits;    // of those, the ones that had to wait
+} BenchLoadTotals;
+
+/**
  * What the fps60 harness reads between VI fields (tools/fps60/README.md). The layout is the harness
  * contract: run.py reads these words by offset from the map address of gBenchProbe.
  */
@@ -207,9 +223,19 @@ typedef struct BenchProbe {
     /* 0x44 */ u32 clockReadCost; // PClocks per Bench_CpuNow call, timed at boot
     /* 0x48 */ BenchNoiseRecord cfbNoise[3]; // that tick's noise-pin walk, zero with the pin off
     /* 0x78 */ BenchNoiseTotals noise;
+    /* 0x98 */ BenchLoadTotals load;
 } BenchProbe;
 
 extern BenchProbe gBenchProbe;
+
+/**
+ * A build that presents interpolated images defines both, parallel to cfbTick, and sets them when it binds
+ * sGraphCfbInfos[i] to an image: gBenchCfbKeyframe[i] nonzero when the image is its tick's final image,
+ * gBenchCfbImage[i] the image's index 1..divisor within its tick (the keyframe is index divisor). A
+ * retail-architecture build defines neither: every image is its tick's keyframe. tools/fps60/README.md.
+ */
+extern u32 gBenchCfbKeyframe[3];
+extern u8 gBenchCfbImage[3];
 
 s32 Bench_Boot(struct GameState* gameState);
 void Bench_BeginFrame(struct GameState* gameState);
@@ -217,6 +243,11 @@ void Bench_EndFrame(struct GraphicsContext* gfxCtx, struct GameState* gameState)
 void Bench_TagCfb(CfbInfo* cfb);
 void Bench_PinNoise(CfbInfo* cfb, Gfx* taskList);
 void Bench_ApplyInput(struct GameState* gameState);
+void Bench_DmaIssued(OSMesgQueue* queue);
+void Bench_DmaDone(OSMesgQueue* queue);
+s32 Bench_DmaRecv(OSMesgQueue* queue, s32 flag);
+void Bench_AudioBarrier(void);
+void Bench_AudioSent(void);
 
 u32 Bench_CpuNow(void);
 void Bench_Phase(s32 phase);

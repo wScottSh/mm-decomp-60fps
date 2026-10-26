@@ -1,4 +1,7 @@
 #include "global.h"
+#if BENCH
+#include "bench.h"
+#endif
 #include "sys_cfb.h"
 #include "sys_cmpdma.h"
 #include "z64bombers_notebook.h"
@@ -1122,7 +1125,11 @@ void BombersNotebook_LoadFiles(BombersNotebook* this, s32 flag) {
             this->loadState = BOMBERS_NOTEBOOK_LOAD_STATE_STARTED;
             FALLTHROUGH;
         case BOMBERS_NOTEBOOK_LOAD_STATE_STARTED:
+#if BENCH
+            if (Bench_DmaRecv(&this->loadQueue, flag) == 0) {
+#else
             if (osRecvMesg(&this->loadQueue, NULL, flag) == 0) {
+#endif
                 this->loadState = BOMBERS_NOTEBOOK_LOAD_STATE_DONE;
             }
             break;

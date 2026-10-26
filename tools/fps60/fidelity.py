@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """F1: compare the keyframe sequences of two run.py result directories, scene by scene.
 
-A scene passes when, over the logic ticks both windows cover, every tick has a keyframe in both, the
-keyframes' fb_hash values are equal, and with the noise pin on, so are their noise_hash values (the noise
-commands as the game wrote them). Both runs must have the same noise pin setting. On a failure the scene
-is run again from both ROMs with a frame dump at the first differing tick's final field, and the ares
-framediff.py report is written. See tools/fps60/README.md.
+A scene passes when every tick that has a keyframe in both windows has equal fb_hash values, and with the
+noise pin on equal noise_hash values (the noise commands as the game wrote them), and the candidate has a
+keyframe for every reference tick except the first and last EDGE_TICKS of the reference window. Ticks only
+the candidate shows are reported, not failed: the reference skipped them. Both runs must have the same noise
+pin and load pin settings. On a failure the scene is run again from both ROMs with a frame dump at the first
+differing tick's final field, and the ares framediff.py report is written. See tools/fps60/README.md.
 """
 
 import argparse
@@ -16,56 +17,61 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-import corpus  # noqa: E402
 import run  # noqa: E402
 
 FRAMEDIFF = Path.home() / "repos/ares-wt/mm60-runner/tools/n64-timing/framediff.py"
 
+# A window's first and last ticks can fall on either side of its edge in a run with other timing.
+EDGE_TICKS = 3
 
-def keyframes(path):
+
+def read_tsv(path):
     lines = Path(path).read_text().splitlines()
     header = lines[0].split("\t")
-    rows = [dict(zip(header, l.split("\t"))) for l in lines[1:]]
-    return {int(r["image_tick"]): r for r in rows}
+    return [dict(zip(header, l.split("\t"))) for l in lines[1:]]
 
 
-def compare(base, cand, keys):
-    """Returns (ticks compared, {tick: the keys that differ} in tick order). A tick shown on one side only
-    differs in every key."""
-    if not base or not cand:
-        return 0, {}
-    lo, hi = max(min(base), min(cand)), min(max(base), max(cand))
-    ticks = sorted(t for t in set(base) | set(cand) if lo <= t <= hi)
+def keyframes(path):
+    return {int(r["image_tick"]): r for r in read_tsv(path)}
+
+
+def compare(base, cand, keys, tick=lambda k: k):
+    """Compares two {key: row} maps. `tick` maps a key to its logic tick. Returns (keys compared,
+    {key: the fields that differ} in key order, reference keys the candidate lacks inside the window, keys
+    only the candidate has)."""
+    ticks = sorted({tick(k) for k in base})
+    inner = set(ticks[EDGE_TICKS:-EDGE_TICKS])
+    common = sorted(base.keys() & cand.keys())
     differing = {}
-    for t in ticks:
-        keys_differ = keys if t not in base or t not in cand else [k for k in keys if base[t][k] != cand[t][k]]
-        if keys_differ:
-            differing[t] = keys_differ
-    return len(ticks), differing
+    for k in common:
+        fields = [f for f in keys if base[k][f] != cand[k][f]]
+        if fields:
+            differing[k] = fields
+    missing = sorted(k for k in base.keys() - cand.keys() if tick(k) in inner)
+    extra = sorted(cand.keys() - base.keys())
+    return common, differing, missing, extra
 
 
-def dump(result, scene_name, frame, out):
+def settings(meta):
+    """The run settings two fidelity runs must share. `check` walks twice but pins as `on` does. Result
+    directories from before the noise pin have no noise_pin key, and from before the load pin no load_pin."""
+    mode = meta.get("noise_pin_mode", "on" if meta.get("noise_pin") else "off")
+    return {"noise pin": "on" if mode == "check" else mode, "load pin": meta.get("load_pin", False)}
+
+
+def dump(result, scene, frame, out):
     """Runs the scene again from the result's ROM and dumps stats row `frame`."""
-    meta = json.loads((result / "meta.json").read_text())
-    if run.sha256(meta["rom"]) != meta["rom_sha256"]:
-        raise SystemExit(f"{meta['rom']} changed since {result} was measured; cannot dump its frames")
-    rom, symbols = run.load_rom(meta["rom"], meta["map"])
-    scene = next(s for s in corpus.SCENES if s["name"] == scene_name)
-    ppm = out / f"{scene_name}.ppm"
-    run.run_scene(rom, symbols, Path(meta["runner"]), scene, out, "on" if meta.get("noise_pin") else None,
-                  dump_frames=[(frame, ppm)])
+    ppm = out / f"{scene}.ppm"
+    run.rerun(result, scene, [(frame, ppm)], out)
     return ppm
 
 
-def report_failure(base, cand, scene, tick, kb, kc, out):
+def dump_pair(base, cand, scene, base_frame, cand_frame, out):
+    """Dumps both frames and writes the framediff report. Returns where they are."""
     out.mkdir(parents=True, exist_ok=True)
-    if tick not in kb or tick not in kc:
-        side = "base" if tick not in kb else "candidate"
-        (out / f"{scene}.txt").write_text(f"tick {tick} has no keyframe in the {side} window\n")
-        return f"no keyframe for tick {tick} in the {side}"
     with ThreadPoolExecutor(max_workers=2) as pool:
-        a = pool.submit(dump, base, scene, int(kb[tick]["final_frame"]), out / "base")
-        b = pool.submit(dump, cand, scene, int(kc[tick]["final_frame"]), out / "cand")
+        a = pool.submit(dump, base, scene, base_frame, out / "base")
+        b = pool.submit(dump, cand, scene, cand_frame, out / "cand")
         ppm_a, ppm_b = a.result(), b.result()
     proc = subprocess.run([sys.executable, str(FRAMEDIFF), str(ppm_a), str(ppm_b), "--out",
                            str(out / f"{scene}-diff.png")], capture_output=True, text=True)
@@ -83,36 +89,42 @@ def main():
 
     base_meta = json.loads((args.base / "meta.json").read_text())
     cand_meta = json.loads((args.cand / "meta.json").read_text())
-    scenes, cand_scenes = base_meta["scenes"], cand_meta["scenes"]
-    # Result directories from before the noise pin have no noise_pin key; they ran without it.
-    pin = base_meta.get("noise_pin", False)
-    if cand_meta.get("noise_pin", False) != pin:
-        print(f"F1 FAIL: base noise pin {pin}, candidate {cand_meta.get('noise_pin', False)}; compare runs with "
-              "the same setting")
+    if settings(base_meta) != settings(cand_meta):
+        print(f"F1 FAIL: base runs with {settings(base_meta)}, candidate with {settings(cand_meta)}; compare runs "
+              "with the same settings")
         sys.exit(1)
-    if not pin:
+    pin = settings(base_meta)["noise pin"]
+    if pin == "off":
         print("noise pin off in both runs: RDP noise follows RDP timing, so any timing change fails F1")
-    keys = ["fb_hash", "noise_hash"] if pin else ["fb_hash"]
+    elif pin == "noise-only":
+        print("noise-only runs: stale span reads follow RDP timing; stale_reads.py measures them")
+    keys = ["fb_hash"] if pin == "off" else ["fb_hash", "noise_hash"]
     failed = False
-    for scene in scenes:
-        if scene not in cand_scenes:
+    for scene in base_meta["scenes"]:
+        if scene not in cand_meta["scenes"]:
             print(f"{scene}: FAIL, not in the candidate run")
             failed = True
             continue
         kb, kc = keyframes(args.base / scene / "keyframes.tsv"), keyframes(args.cand / scene / "keyframes.tsv")
-        n, differing = compare(kb, kc, keys)
-        if n == 0:
+        common, differing, missing, extra = compare(kb, kc, keys)
+        notes = f"; {len(extra)} ticks only in the candidate: {extra}" if extra else ""
+        if missing:
+            print(f"{scene}: FAIL, the candidate has no keyframe for {len(missing)} reference ticks inside the "
+                  f"window: {missing}{notes}")
+            failed = True
+        if not common:
             print(f"{scene}: FAIL, no ticks in common")
             failed = True
         elif differing:
             first = next(iter(differing))
-            where = report_failure(args.base, args.cand, scene, first, kb, kc, out / scene)
+            where = dump_pair(args.base, args.cand, scene, int(kb[first]["final_frame"]),
+                              int(kc[first]["final_frame"]), out / scene)
             by_key = ", ".join(f"{k} in {sum(1 for d in differing.values() if k in d)}" for k in keys)
             print(f"{scene}: FAIL, first differing tick {first} ({' and '.join(differing[first])}), "
-                  f"{len(differing)} of {n} ticks differ ({by_key}); {where}")
+                  f"{len(differing)} of {len(common)} ticks differ ({by_key}); {where}{notes}")
             failed = True
-        else:
-            print(f"{scene}: PASS, {n} ticks identical (ticks {min(kb.keys() & kc.keys())} to {max(kb.keys() & kc.keys())})")
+        elif not missing:
+            print(f"{scene}: PASS, {len(common)} ticks identical (ticks {common[0]} to {common[-1]}){notes}")
     print("F1 FAIL" if failed else "F1 PASS")
     sys.exit(1 if failed else 0)
 
